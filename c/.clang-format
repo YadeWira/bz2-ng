@@ -1,0 +1,52 @@
+# House style of bz2-ng's own C code: libdeflate's (itself close to the Linux
+# kernel's). Files that are libbz2's own code (bzlib.h, lib/bzlib.c,
+# lib/bzlib_private.h, lib/randtable.c, programs/, test/reference/,
+# test/rand_hook.c) keep upstream formatting, and the files taken from
+# libdeflate (lib/common_defs.h, lib/cpu_features_common.h,
+# lib/*/cpu_features.[ch]) keep libdeflate's own layout; scripts/format.sh
+# formats everything else.
+#
+# What clang-format cannot reproduce exactly: libdeflate aligns #define values
+# and trailing backslashes with tabs by hand, at varying columns; this file
+# aligns them consistently instead.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 8
+TabWidth: 8
+UseTab: Always
+ContinuationIndentWidth: 8
+ColumnLimit: 80
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: false
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterFunction: true
+  AfterStruct: false
+  AfterUnion: false
+  BeforeElse: false
+  BeforeWhile: false
+  SplitEmptyFunction: true
+BreakAfterReturnType: AllDefinitions
+BreakBeforeTernaryOperators: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+IndentCaseLabels: false
+IndentPPDirectives: AfterHash
+PPIndentWidth: 2
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Left
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+PointerAlignment: Right
+SpaceAfterCStyleCast: false
+SortIncludes: Never
+ReflowComments: true
+MaxEmptyLinesToKeep: 1
+KeepEmptyLines:
+  AtStartOfBlock: false

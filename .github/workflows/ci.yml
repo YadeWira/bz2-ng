@@ -1,0 +1,62 @@
+name: CI
+
+# Runs when started by hand and when the library changes on main, not on every
+# push: minutes on a private repository are billed, so branches are tested
+# locally and CI is started deliberately at milestones (Actions tab, or
+# `gh workflow run ci.yml --ref <branch>`).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "c/**"
+      - ".github/workflows/ci.yml"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.cc }}${{ matrix.suffix }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux runners only: x86-64 exercises the scalar, SSE4 and AVX2
+        # tiers, arm64 the scalar and NEON tiers. The tests iterate over
+        # every tier the runner's CPU supports.
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        cc: [gcc, clang]
+        cmake_args: [""]
+        suffix: [""]
+        include:
+          - os: ubuntu-24.04
+            cc: clang
+            cmake_args: "-DBZ2NG_SANITIZE=ON"
+            suffix: " / sanitisers"
+          - os: ubuntu-24.04-arm
+            cc: clang
+            cmake_args: "-DBZ2NG_SANITIZE=ON"
+            suffix: " / sanitisers"
+          - os: ubuntu-24.04
+            cc: gcc
+            cmake_args: "-DBZ2NG_DECODER_IN_FORMULA=ON"
+            suffix: " / in-formula decoder"
+          - os: ubuntu-24.04
+            cc: gcc
+            cmake_args: "-DBZ2NG_NO_STDIO=ON"
+            suffix: " / BZ_NO_STDIO"
+    steps:
+      # The tests generate their own data, so the LFS corpora are not fetched.
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S c -B c/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=${{ matrix.cc }} ${{ matrix.cmake_args }}
+      - name: Build
+        run: cmake --build c/build -j "$(nproc)"
+      - name: Test
+        run: ctest --test-dir c/build -j "$(nproc)" --output-on-failure

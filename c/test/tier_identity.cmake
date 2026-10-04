@@ -1,0 +1,40 @@
+# Runs tier_identity under every tier in TIERS (a ;-list) and requires the
+# same digest from all that ran.  A tier the CPU lacks is skipped (the
+# program exits 77); an unreadable result, or no tier run at all, is a
+# failure; with one tier to compare the test reports itself skipped (see
+# test/CMakeLists.txt).
+# usage: cmake -DPROGRAM=... -DTIERS=... -P tier_identity.cmake
+set(_ref "")
+set(_ran 0)
+foreach(_tier IN LISTS TIERS)
+  set(ENV{BZ2NG_TIER} ${_tier})
+  execute_process(COMMAND ${PROGRAM} OUTPUT_VARIABLE _out ERROR_VARIABLE _err RESULT_VARIABLE _rc)
+  if(_rc EQUAL 77)
+    message(STATUS "tier ${_tier}: not available on this CPU")
+    continue()
+  endif()
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "tier ${_tier}: tier_identity failed (${_rc}): ${_out}${_err}")
+  endif()
+  if(NOT _out MATCHES "tier=([a-z0-9]+) digest=([0-9a-f]+)")
+    message(FATAL_ERROR "tier ${_tier}: unreadable output: ${_out}")
+  endif()
+  set(_got ${CMAKE_MATCH_1})
+  set(_digest ${CMAKE_MATCH_2})
+  if(NOT _got STREQUAL _tier)
+    message(FATAL_ERROR "tier ${_tier}: the program ran on tier ${_got}")
+  endif()
+  message(STATUS "tier ${_tier}: digest ${_digest}")
+  math(EXPR _ran "${_ran} + 1")
+  if(_ref STREQUAL "")
+    set(_ref ${_digest})
+  elseif(NOT _digest STREQUAL _ref)
+    message(FATAL_ERROR "tier ${_tier} produced different bytes (${_digest} vs ${_ref})")
+  endif()
+endforeach()
+if(_ran EQUAL 0)
+  # The scalar tier runs everywhere, so no tier at all is a harness failure.
+  message(FATAL_ERROR "no tier ran (TIERS=${TIERS})")
+elseif(_ran EQUAL 1)
+  message(STATUS "fewer than two tiers to compare: skipped")
+endif()

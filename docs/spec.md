@@ -15,7 +15,7 @@ bz2-ng is a drop-in replacement for libbz2 1.0.8 with a much faster single-threa
 
 - **Parallelism.** The encoder and decoder are single-threaded. No block-parallel modes, now or as an option.
 - **A new format.** Streams are bzip2 streams; anything bz2-ng writes libbz2 reads, and the reverse.
-- **Better compression by default.** The default output is byte-identical to libbz2's (§2.3). Ratio-improving modes are opt-in and belong to the extended API (§4.8).
+- **Better compression by default.** The default output is byte-identical to libbz2's (§2.3). Ratio-improving modes are opt-in and belong to the extended API (§4.9).
 
 ## 2. Compatibility contract
 
@@ -34,8 +34,9 @@ For any sequence of calls a correct program can make, every call returns the sam
 
 - **Compression:** `BZ_RUN`, `BZ_FLUSH` and `BZ_FINISH` with input and output in pieces of any size down to zero and one byte; `BZ_PARAM_ERROR` for a `BZ_RUN` that makes no progress; `BZ_SEQUENCE_ERROR` when `avail_in` or the action changes during a flush or finish; `verbosity` left unvalidated in `BZ2_bzCompressInit`; `workFactor` validated to 0–250 (it selects nothing); a `bz_stream` that was copied after initialisation is rejected. [K §6]
 - **Decompression:** resumable at any input and any output byte; input consumed exactly as libbz2 consumes it; the same streams accepted and rejected, with the same error code after the same output has been delivered. That covers incomplete and oversubscribed Huffman code sets, selector-count handling as in 1.0.8, randomised blocks, block and stream CRC errors, truncated input, and `small` mode. [J §1, §4]
+- **Buffers:** neither direction modifies the caller's output buffer beyond the bytes it delivers, even where `avail_out` would allow it; the differential testers compare the buffers beyond the delivered bytes, not only the delivered bytes. Neither direction reads outside `[next_in, next_in + avail_in)`. Within that range both may load a few bytes ahead of what they consume (the decoder's 64-bit refill, the encoder's run scan); those bytes are not consumed, are read again on the next call, and never affect the result. A caller that passes an `avail_in` larger than its buffer and relies on decompression stopping at the end of the stream is outside the contract: libbz2 happens never to touch the bytes after a stream's end, and bz2-ng may load a few of them, as zlib's fast inflate loop does.
 - **Wrappers:** `BZ2_bzBuffToBuff*`, `BZ2_bzRead*`, `BZ2_bzWrite*` and the zlib-style functions are libbz2's own code over the new low-level functions, so concatenated streams, `BZ2_bzReadGetUnused` and `BZ_OUTBUFF_FULL` behave as before.
-- **Allocation:** all memory through `bzalloc`/`bzfree`/`opaque`, allocated in the `Init` call so `BZ_MEM_ERROR` appears where callers expect it; no mutable static data. An allocator that returns memory aligned only to 4 bytes, which is enough for libbz2, must remain enough: the state is aligned internally.
+- **Allocation:** all memory through `bzalloc`/`bzfree`/`opaque`, allocated in the `Init` call so `BZ_MEM_ERROR` appears where callers expect it. The only mutable process-wide data are the cached CPU feature mask and the dispatch pointers, which are written once in a way that is safe under concurrent first use. An allocator that returns memory aligned only to 4 bytes, which is enough for libbz2, must remain enough: the state is aligned internally.
 - **Diagnostics:** the decoder's output on stderr matches libbz2's at every `verbosity`; the encoder's per-block and CRC lines match (§2.5 lists what is not reproduced).
 
 ### 2.3 Output
@@ -50,13 +51,13 @@ Every kernel tier (§4.5) produces the same bytes; output never depends on the C
 
 | | Documented by libbz2 | bz2-ng |
 |---|---|---|
-| Compression | 400 kB + 8 × block size | inside the formula at every level; projected at about 8 × block size + 85 kB with the project's sorter (§7) |
-| Decompression | 100 kB + 4 × block size | inside the formula, or one block more (100 kB + 5 × block size) if that is what the speed costs; see below |
+| Compression | 400 kB + 8 × block size | inside the formula at every level: 8 × block size + 84,639 bytes, measured [M1] |
+| Decompression | 100 kB + 4 × block size | one block and 5 kB more by default: 105 kB + 5 × block size; an in-formula layout is a build option; see below |
 | Decompression, `small` | 100 kB + 2.5 × block size | inside the formula at every level |
 
 Memory is measured through a counting `bzalloc` in the test suite, at every level, and a build that exceeds its stated bound fails. [J §2, K §3]
 
-**Decoder layout rule.** The in-formula layout costs 1–7% on full-size blocks against a layout with 4-byte table entries throughout, which needs one more block (about 900 kB at level 9). One extra block is an acceptable price for that speed, but only if nothing else recovers it: with every other decoder improvement in place, the in-formula layout, a cache-line-aligned 3-byte table and the 4-byte layout are measured on the reference machines, and the in-formula layout is kept if it reaches the same speed. If the larger layout becomes the default, it is listed in §2.5 and in the porting note.
+**Decoder layout rule.** A layout with 4-byte table entries throughout needs one more block than libbz2 documents (about 900 kB at level 9). It also walks 24 chains rather than 16 on blocks of at least 65,536 rows, which takes 8,224 bytes more working space and moves the fixed part of its bound from 100 kB to 105 kB [M1d]; the in-formula layout keeps 16 chains and its bound. One extra block is an acceptable price for speed, but only if nothing else recovers it. Measured in the library with native kernels in place, the 4-byte layout is 3–5% faster on full-size blocks on the M4 and 3–13% faster on the servers, and equal on smaller blocks [M1 §6], so it is the default and is listed in §2.5. The in-formula layout (3-byte entries above three quarters of the level's block size) stays available as a build option for callers that size memory pools by libbz2's formula. A cache-line-aligned 3-byte table is still to be tried (§7, M3); if it reaches the same speed inside the formula, the default returns to the formula.
 
 ### 2.5 Known divergences
 
@@ -65,8 +66,9 @@ These are the only places behaviour differs from libbz2 1.0.8. Each is deliberat
 | Behaviour | libbz2 | bz2-ng | Reason |
 |---|---|---|---|
 | `origPtr` of exactly periodic blocks | depends on which sorter ran | last tied row | §2.3 |
-| A decompression call after an error return | resumes its state machine | returns the same error again | The manual permits only `BZ2_bzDecompressEnd` after an error; resuming reaches undefined behaviour inside libbz2 itself. [J §5] Open decision D2. |
-| `bzalloc` request sizes | four requests, largest 3.6 MB at level 9 | fewer bytes in total, but the largest single request is larger | A caller whose pool is carved to libbz2's exact request sizes could fail. The total stays inside the documented formula, which is the documented contract. [K §6] |
+| A decompression call after an error return | resumes its state machine | returns the same error again | The manual permits only `BZ2_bzDecompressEnd` after an error; resuming reaches undefined behaviour inside libbz2 itself. [J §5, M1e] One case is unchanged from libbz2: after a combined-CRC mismatch at the end of a stream the stream is finished, and the next call returns `BZ_SEQUENCE_ERROR`. Open decision D2. |
+| Decompression memory | 100 kB + 4 × block size | 105 kB + 5 × block size by default | §2.4; 3–13% faster on full-size blocks. A build option restores the documented formula. |
+| `bzalloc` request sizes | compression: four requests, largest 3.6 MB at level 9; decompression: the state and one table | compression: fewer bytes in total, but the largest single request is larger; decompression: the state and one larger request, and even the in-formula layout uses 23–32 kB more in total than libbz2 itself does | A caller whose pool is carved to libbz2's exact request sizes, or to what libbz2 actually uses rather than what it documents, could fail. Compression and in-formula decompression stay inside the documented formulas, which are the documented contract; the default decompression layout is the row above. [K §6, M1d] |
 | Encoder diagnostics at `verbosity` ≥ 2 that describe libbz2's sorter, and all detail at ≥ 3 | printed | not printed | They describe internals that no longer exist. |
 | Exported private symbols (`BZ2_blockSort`, `BZ2_decompress`, `BZ2_crc32Table`, …) | leak from the shared library | not exported | Not part of the API. A reverse-dependency check precedes the first release (§7). Open decision D3. |
 
@@ -80,6 +82,8 @@ Output and memory are fixed by §2, so "better" is speed. The reference is libbz
 2. **Small streams.** The same holds for independent streams from 1 kB to 64 kB, each with its own `Init` and `End`.
 3. **Call pattern.** With caller buffers of 64 bytes or more, the legacy API runs within 10% of whole-buffer speed in both directions.
 4. **No regression.** Every optimisation lands with a benchmark it must not regress; the benchmark suite runs on the reference machines for each release candidate.
+
+**When a change gains in one place and loses in another.** The pairings that count most are clang on AArch64 and gcc on x86-64. A small loss with gcc on AArch64 or with clang on x86-64 is acceptable in exchange for a gain on one of those pairings, and is recorded with its figures. Requirement 1 holds on every pairing regardless.
 
 **Where the prototypes stand**
 
@@ -132,8 +136,8 @@ The legacy drivers own all `bz_stream` bookkeeping. The block encoder and decode
 One function is the whole interface between the encoder and the sorter:
 
 ```c
-int32_t bzs_bwt(const uint8_t *T, uint8_t *L, int32_t n, int32_t q,
-                int32_t *freq, int32_t *work, size_t work_ints);
+int32_t bzng_bwt(const uint8_t *T, uint8_t *L, int32_t n, int32_t q,
+                 int32_t *freq, int32_t *work, size_t work_ints);
 ```
 
 `T` is the block's least rotation; the function writes the cyclic BWT to `L` (which may alias `T`) and the byte histogram to `freq`, and returns the row of rotation `q`, which is `origPtr`. It allocates nothing and has no global state. The workspace is `n + n/2 + 2048` ints, which is guaranteed sufficient for any input. [T §2]
@@ -144,15 +148,15 @@ The sorter is the project's own, derived from Yuta Mori's MIT-licensed sais-lite
 
 - **Header parser.** libbz2's per-bit resumable structure, reading from a 64-bit buffer. Errors are raised after exactly the bits libbz2 would have read. [J §1]
 - **Symbol loop.** A fast path decodes whole 50-symbol groups when at least 160 input bytes are available (table-driven Huffman, the head of the MTF list in a vector register); an exact path handles one symbol at a time near the end of the caller's input. Both give libbz2's results, including for code sets that are not complete prefix codes.
-- **Block finishing.** Segmented table build, then a multi-chain inverse-BWT walk into a pool of chunks. Blocks above three quarters of the level's block size use 3-byte table entries so that the symbol array can become the walk's output pool; smaller blocks use 4-byte entries in the same allocation. The walk does no I/O.
+- **Block finishing.** Segmented table build, then a multi-chain inverse-BWT walk into a pool of chunks. In the default layout every block uses 4-byte table entries and a separate symbol array becomes the walk's output pool. In the in-formula layout, blocks above three quarters of the level's block size use 3-byte entries so that the symbol array can become the pool, and smaller blocks use 4-byte entries in the same allocation. The walk does no I/O.
 - **Output.** A resumable un-RLE1 with CRC over each call's output, writing straight into the caller's buffer.
 - **`small` mode.** libbz2's packed 2.5-byte table and single chain, with the fast symbol loop and a table lookup in place of the binary search. [J §2.4]
-- **Tunables fixed by measurement:** 24 chains for full-size blocks (fewer for small blocks), software prefetch in the walk, four table-build segments on x86 and Apple silicon and two on other AArch64 cores. None of them affects output. [P §7]
+- **Tunables fixed by measurement:** 24 chains for blocks of at least 65,536 rows in the default layout and 16 in the in-formula layout (fewer for smaller blocks), software prefetch in walks of 16 or more chains, and four table-build segments on every target. None of them affects output. [P §7, M1d] Two build segments were 1–7% faster than four on Graviton4 in the prototype [P §7]; the library has not taken that up (§7, M3).
 - **Safety invariants** from the decoder's CVE history are enforced on every path; a fast path never reads or writes outside its buffers on hostile input. [F]
 
 ### 4.5 Kernels and run-time dispatch
 
-- Every ISA-specific routine sits behind one table of function pointers per library, filled on first use from the CPU's features (`cpuid`/`xgetbv` on x86, `getauxval` on Linux AArch64, `sysctl` on macOS). **The tier is chosen at run time, never at compile time**: one binary carries all tiers for its architecture.
+- Every ISA-specific routine sits behind a dispatch pointer that selects its implementation on first call from one cached mask of the CPU's features (`cpuid`/`xgetbv` on x86, the auxiliary vector read from `/proc/self/auxv` on Linux AArch64, `sysctl` on macOS), as libdeflate does. **The tier is chosen at run time, never at compile time**: one binary carries all tiers for its architecture.
 - Each tier is its own translation unit compiled with that tier's flags; the rest of the library uses the distribution's baseline flags.
 - Granularity is one call per block per stage; the decoder's symbol loop is instantiated whole per tier so the MTF head can live in a register across symbols.
 
@@ -175,7 +179,11 @@ All stages are exact integer computations. Tests require every tier available on
 
 C11, no compiler extensions without a fallback. Little- and big-endian, 32- and 64-bit. gcc, clang and MSVC. Platforms without a vector tier run the scalar tier and must still meet §3.
 
-### 4.8 Extended API
+### 4.8 Code style
+
+The library follows libdeflate's conventions, so that it reads like one well-known, respected codebase and can be reviewed against it: tabs at width 8, 80-column lines, kernel-style braces, one `common_defs.h` for compiler and platform abstractions, CPU feature detection and kernels in `lib/x86/` and `lib/arm/` with a small selector header per kernel family, dispatch pointers that replace themselves on first call, and template headers for per-tier instantiations. Files that are libbz2's own code, unmodified or lightly altered, keep upstream's formatting so they diff cleanly against bzip2 1.0.8.
+
+### 4.9 Extended API
 
 Deferred until after the drop-in is complete (§7, M5). It adds no speed; its value is reusable contexts with input-sized memory, and options the legacy API has no slot for. The one ratio option planned is a guard that codes each block both libbz2's way and an alternative way and emits the smaller, which is never larger than libbz2 by construction and gains 0.13–0.37% for 5–9% more encode time. [H3] Everything in the extended API lives under a new symbol prefix and a separate header.
 
@@ -189,26 +197,29 @@ Deferred until after the drop-in is complete (§7, M5). It adds no speed; its va
 - **Memory.** Counting-allocator tests against the formulas of §2.4 at every level.
 - **Drop-in tests.** bzip2's own `make test`; the `bzip2` program built against bz2-ng compared with stock bzip2 across option combinations (stdout, stderr, exit status); CPython's `test_bz2` with the library preloaded; further downstream suites before release (§7, M4).
 - **ABI.** The exported symbol list is checked against the 24; `bz_stream` layout is checked by a compile-time test.
+- **Code review.** Library changes are reviewed by independent reviewers against this specification and the house style (§4.8) before they merge; the differential testers, not review, are the evidence of correctness.
 - **Tests generate their data.** The corpora are for benchmarks and bulk checks; unit and conformance tests build their inputs in code.
 
 ## 6. Build and continuous integration
 
 - CMake is the build system, producing a static and a shared library, the `bzip2` and `bzip2recover` programs from libbz2's unmodified sources, and `bzip2.pc`.
 - The build stays simple enough for another build system to reproduce from a short description, because the bindings compile the C sources directly: a flat list of sources, per-tier compiler flags confined to the tier translation units, no generated code, and CPU features detected at run time rather than at configure time.
-- CI builds and tests with **both gcc and clang** on Linux x86-64 and AArch64 and on macOS, with sanitiser jobs, a `BZ_NO_STDIO` job, and emulated big-endian and 32-bit jobs. Windows follows in M2.
+- CI builds and tests with **both gcc and clang** on Linux x86-64 and AArch64, with sanitiser jobs, a `BZ_NO_STDIO` job, and emulated big-endian and 32-bit jobs. Windows follows in M2. macOS is covered by local runs, not hosted runners. CI runs when started deliberately at milestones and on merges to `main`, not on every push.
 - A performance job on fixed reference machines compares against libbz2 for release candidates, for gcc and clang builds: the distribution's default version of each and the latest release of each.
 
 ## 7. Milestones
 
 | | Milestone | Done when |
 |---|---|---|
-| M1 | **Integration.** One library containing the encoder driver, the decoder driver, the project's sorter, and the scalar, SSE4, AVX2 and NEON tiers with run-time dispatch, over libbz2's stdio layer. | Both differential testers pass on every tier; bzip2's `make test` and CPython's `test_bz2` pass; memory is inside every formula, measured; speed within 3% of the prototypes at the shipping configuration on the four reference machines. |
+| M1 (done) | **Integration.** One library containing the encoder driver, the decoder driver, the project's sorter, and the scalar, SSE4, AVX2 and NEON tiers with run-time dispatch, over libbz2's stdio layer. | Both differential testers pass on every tier; bzip2's `make test` and CPython's `test_bz2` pass; memory is inside every formula, measured; speed within 3% of the prototypes at the shipping configuration on the four reference machines. |
 | M2 | **Hardening.** Fuzz targets, the CI matrix of §6, export list and ABI checks, `BZ_NO_STDIO`, Windows, big-endian and 32-bit. | CI green on the full matrix; a fuzzing campaign of agreed length finds nothing. |
-| M3 | **Performance.** Sorter improvements; the gcc-specific slow loops; the decoder layout decision of §2.4 (including a cache-line-aligned 3-byte table); a wider MTF head across several registers; an interleaved or PMULL-folding CRC on AArch64 in place of the single-chain `crc32` kernel (libdeflate's approach, MIT; CRC is 2–4% of decode on Apple silicon today). | Requirement 1 of §3 met with gcc and clang on every reference machine; each change carries its benchmark. |
+| M3 | **Performance.** In the library already: the sorter's scan forms chosen per compiler and target [M1c]; for the decoder, mask arithmetic in the symbol loop under gcc, 24 walk chains in the default layout and walk prefetch [M1d]; and a table build that under clang loads the four cursors of an iteration before any table store and writes each table entry before its cursor [M1f, M1g]. Still to do: two table-build segments on AArch64 cores other than Apple's [P §7]; the decoder layout decision of §2.4 (including a cache-line-aligned 3-byte table); a wider MTF head across several registers; an interleaved or PMULL-folding CRC on AArch64 in place of the single-chain `crc32` kernel (libdeflate's approach, MIT; CRC is 2–4% of decode on Apple silicon today). | Requirement 1 of §3 met with gcc and clang on every reference machine; each change carries its benchmark. |
 | M4 | **Drop-in validation.** Rebuild-free substitution on a real distribution: the test suites of a chosen set of dependants run against bz2-ng; packaging names; a porting note listing §2.5. | The chosen suites pass; private-symbol reverse-dependency check done. |
 | M5 | **Extended API and bindings.** The extended API; a Rust `-sys` crate with a safe wrapper in `rust/`; a JNI library in `java/`. | Reusable contexts and the guarded ratio mode available under the new prefix; both bindings build from the sources in `c/` and pass their own round-trip and cross-decoding tests; documented. |
 
-**Integration risk in M1.** The project's sorter has not yet run behind the legacy encoder driver. The driver stages each compressed block in the tail of the sort workspace, and that arrangement was measured with a different sorter's workspace layout. Arithmetic says the total fits (about 8 × block size + 85 kB against 400 kB + 8 × block size), but it is unmeasured until M1.
+**M1 outcome.** The library is in `c/` [M1]. Conformance, drop-in tests, memory and "never slower" are met on all four reference machines with gcc and clang. Speed is within 3% of the prototypes on the M4 and for Graviton4 encode; x86 encode is 3–5% under the projection of §3, and four server decode cells are at 0.83–0.92 of the one-shot prototype, which M3 takes up (walk chains, prefetch, and the gcc-specific loop shapes of report P2).
+
+**Since M1.** The cross-review's findings are fixed [M1b]. The sorter's later scan forms are in the library: level 9 compression with gcc is 6–9% faster on text on the x86 servers, and unchanged to 4% faster elsewhere [M1c]. The decoder's symbol loop under gcc, 24 walk chains and walk prefetch are in: level 9 decompression of full-size blocks in the default layout is 7–21% faster on the three servers with gcc and clang and about 1% faster on the M4, with 16 KiB streams unchanged to 13% faster [M1d]. The slowest of the four M1 decode cells (Granite Rapids, MC:Z, clang) is traced to the table build and recovered. Writing the table entry before the cursor gains about 8% there and costs nothing elsewhere [M1f]. Loading all four cursors before any table store gains a further 14–16% there and ends a slow mode on small streams; it is neutral on the M4 and Graviton4, costs 0.4–1.2% on MC:Z with clang on Zen 5, and leaves gcc builds unchanged [M1g].
 
 **Before any public release:** the sorter's provenance record is complete and reviewed (§8, open decision D5); licence statements for the benchmark data are verified; libsais, SIMDe and other spike-only code are confirmed absent from the library.
 

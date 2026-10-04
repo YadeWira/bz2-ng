@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: bzip2
+Description: Lossless, block-sorting data compression library (bz2-ng, a drop-in replacement for libbz2 1.0.8)
+Version: 1.0.8
+Libs: -L${libdir} -lbz2
+Cflags: -I${includedir}@BZ2NG_PC_CFLAGS@

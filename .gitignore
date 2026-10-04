@@ -60,6 +60,7 @@ ephemeral/
 # Spike build and run outputs
 build/
 build_*/
+build-*/
 work/
 __pycache__/
 *.pyc
