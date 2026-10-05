@@ -30,6 +30,9 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef _WIN32
+#  include <windows.h>
+#endif
 
 #include "dec.h"
 #include "kern.h"
@@ -98,14 +101,25 @@ die_stream(const char *set, size_t i, const char *impl, const char *what,
 	exit(3);
 }
 
-/* Seconds on a monotonic clock. */
+/*
+ * Seconds on a monotonic clock.  Windows has no clock_gettime, so it uses the
+ * performance counter, as libdeflate's programs/test_util.c (MIT) does.
+ */
 static double
 now(void)
 {
+#ifdef _WIN32
+	LARGE_INTEGER count, freq;
+
+	QueryPerformanceCounter(&count);
+	QueryPerformanceFrequency(&freq);
+	return (double)count.QuadPart / (double)freq.QuadPart;
+#else
 	struct timespec ts;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
 }
 
 /* Reads at most max bytes of path; *n receives the length. */
@@ -150,10 +164,10 @@ read_file(const char *path, size_t max, size_t *n)
  * call that failed (*what names it).
  */
 static int
-compress_one(int (*init)(bz_stream *, int, int, int),
-	     int (*compress)(bz_stream *, int), int (*end)(bz_stream *),
-	     const u8 *in, size_t n, u8 *out, size_t cap, size_t *len,
-	     const char **what)
+compress_one(int(BZ_API(*init))(bz_stream *, int, int, int),
+	     int(BZ_API(*compress))(bz_stream *, int),
+	     int(BZ_API(*end))(bz_stream *), const u8 *in, size_t n, u8 *out,
+	     size_t cap, size_t *len, const char **what)
 {
 	bz_stream s;
 	int rc;

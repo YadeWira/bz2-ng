@@ -1,18 +1,36 @@
 # Requires the shared library LIB to export exactly the functions in EXPECTED
-# (a ;-list) and nothing else.
-# usage: cmake -DLIB=... -DEXPECTED=... -P exported_symbols.cmake
-if(APPLE)
+# (a ;-list) and nothing else.  A Windows DLL is read with OBJDUMP (GNU
+# objdump for the target), whose -p output lists the export table's names.
+# usage: cmake -DLIB=... -DEXPECTED=... [-DOBJDUMP=...] -P exported_symbols.cmake
+if(LIB MATCHES "[.]dll$")
+  if(NOT OBJDUMP)
+    message(FATAL_ERROR "a DLL needs OBJDUMP, GNU objdump for its target")
+  endif()
+  execute_process(COMMAND ${OBJDUMP} -p ${LIB} OUTPUT_VARIABLE _out RESULT_VARIABLE _rc)
+elseif(APPLE)
   execute_process(COMMAND nm -gU ${LIB} OUTPUT_VARIABLE _out RESULT_VARIABLE _rc)
 else()
   execute_process(COMMAND nm -D --defined-only ${LIB} OUTPUT_VARIABLE _out RESULT_VARIABLE _rc)
 endif()
 if(NOT _rc EQUAL 0)
-  message(FATAL_ERROR "nm failed on ${LIB}")
+  message(FATAL_ERROR "listing the symbols of ${LIB} failed")
 endif()
 string(REPLACE "\n" ";" _lines "${_out}")
 set(_got "")
+set(_in_export_names 0)
 foreach(_line IN LISTS _lines)
-  if(_line MATCHES "^[0-9a-fA-F]+ [A-Za-z] _?([A-Za-z0-9_@.]+)$")
+  if(LIB MATCHES "[.]dll$")
+    # The names follow "[Ordinal/Name Pointer] Table", one "[ n] name" each.
+    # They are kept whole: a 32-bit stdcall name decorated with "@n" is not
+    # the name libbz2's own DLL exports.
+    if(_line MATCHES "^\\[Ordinal/Name Pointer\\] Table")
+      set(_in_export_names 1)
+    elseif(_in_export_names AND _line MATCHES "^[ \t]*\\[ *[0-9]+\\] ([A-Za-z0-9_@]+)$")
+      list(APPEND _got ${CMAKE_MATCH_1})
+    elseif(_in_export_names)
+      set(_in_export_names 0)
+    endif()
+  elseif(_line MATCHES "^[0-9a-fA-F]+ [A-Za-z] _?([A-Za-z0-9_@.]+)$")
     set(_sym ${CMAKE_MATCH_1})
     string(REGEX REPLACE "@.*" "" _sym "${_sym}")
     list(APPEND _got ${_sym})

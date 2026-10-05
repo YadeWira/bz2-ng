@@ -1553,7 +1553,16 @@ phase_read(void)
 {
 	uint64_t f0 = n_fail, cases = 0;
 	rs = seed;
-	char path[] = "/tmp/bzng_difftest_XXXXXX";
+#ifdef _WIN32
+	/* Windows has no /tmp; TEMP is set for every process. */
+	const char *dir = getenv("TEMP");
+	if (dir == NULL)
+		dir = ".";
+#else
+	const char *dir = "/tmp";
+#endif
+	char path[1024];
+	snprintf(path, sizeof path, "%s/bzng_difftest_XXXXXX", dir);
 	int fd = mkstemp(path);
 	if (fd < 0) {
 		perror("mkstemp");
@@ -1787,19 +1796,28 @@ combined_crc_bit(const Stream *s)
  */
 static const char *
 stream_difference(const bz_stream *x, const uint8_t *x_out, const bz_stream *y,
-		  const uint8_t *y_out, const uint8_t *in, long *xv, long *yv)
+		  const uint8_t *y_out, const uint8_t *in, long long *xv,
+		  long long *yv)
 {
-	const long field[6][2] = {
-		{(long)((const uint8_t *)x->next_in - in),
-		 (long)((const uint8_t *)y->next_in - in)},
-		{(long)x->avail_in, (long)y->avail_in},
-		{(long)((const uint8_t *)x->next_out - x_out),
-		 (long)((const uint8_t *)y->next_out - y_out)},
-		{(long)x->avail_out, (long)y->avail_out},
-		{(long)((uint64_t)x->total_in_hi32 << 32 | x->total_in_lo32),
-		 (long)((uint64_t)y->total_in_hi32 << 32 | y->total_in_lo32)},
-		{(long)((uint64_t)x->total_out_hi32 << 32 | x->total_out_lo32),
-		 (long)((uint64_t)y->total_out_hi32 << 32 | y->total_out_lo32)},
+	/*
+	 * long long: the totals are 64-bit, and long is 32-bit on Windows and
+	 * on 32-bit targets.
+	 */
+	const long long field[6][2] = {
+		{(long long)((const uint8_t *)x->next_in - in),
+		 (long long)((const uint8_t *)y->next_in - in)},
+		{(long long)x->avail_in, (long long)y->avail_in},
+		{(long long)((const uint8_t *)x->next_out - x_out),
+		 (long long)((const uint8_t *)y->next_out - y_out)},
+		{(long long)x->avail_out, (long long)y->avail_out},
+		{(long long)((uint64_t)x->total_in_hi32 << 32 |
+			     x->total_in_lo32),
+		 (long long)((uint64_t)y->total_in_hi32 << 32 |
+			     y->total_in_lo32)},
+		{(long long)((uint64_t)x->total_out_hi32 << 32 |
+			     x->total_out_lo32),
+		 (long long)((uint64_t)y->total_out_hi32 << 32 |
+			     y->total_out_lo32)},
 	};
 	static const char *const name[6] = {"next_in",	"avail_in",
 					    "next_out", "avail_out",
@@ -1839,10 +1857,10 @@ api_changed(const char *name, int variant, int call, const char *who,
 	    const bz_stream *z0, const bz_stream *z, const uint8_t *out,
 	    const uint8_t *in, const uint8_t *pattern)
 {
-	long v0, v;
+	long long v0, v;
 	const char *d = stream_difference(z0, out, z, out, in, &v0, &v);
 	if (d != NULL) {
-		api_fail(name, variant, call, "%s changed %s from %ld to %ld",
+		api_fail(name, variant, call, "%s changed %s from %lld to %lld",
 			 who, d, v0, v);
 		return 1;
 	}
@@ -1901,7 +1919,7 @@ api_after_first_return(const Stream *s, const uint8_t *in, int variant,
 		if (call == 0) {
 			const int ra = ref_BZ2_bzDecompress(&a);
 			const int rb = BZ2_bzDecompress(&b);
-			long va, vb;
+			long long va, vb;
 			const char *d = stream_difference(&a, out_a, &b, out_b,
 							  in, &va, &vb);
 			if (ra != rb) {
@@ -1911,7 +1929,7 @@ api_after_first_return(const Stream *s, const uint8_t *in, int variant,
 			}
 			if (d != NULL) {
 				api_fail(s->name, variant, call,
-					 "%s ref %ld ng %ld", d, va, vb);
+					 "%s ref %lld ng %lld", d, va, vb);
 				break;
 			}
 			/* only then is libbz2 known to be idle */

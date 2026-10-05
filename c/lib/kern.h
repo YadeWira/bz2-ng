@@ -78,11 +78,16 @@ enum bzng_tier {
 
 DECLARE_TIER_KERNELS(scalar)
 
-/* Include architecture-specific tiers if available. */
+/*
+ * Include architecture-specific tiers if available.  The NEON tier and its
+ * CRC kernel assume little-endian lane and word order (untested on big
+ * endian), so big-endian AArch64 runs the scalar tier, as does x32
+ * (BZNG_X86_TIERS).
+ */
 #undef arch_select_tier
-#if defined(ARCH_X86_64)
+#if BZNG_X86_TIERS
 #  include "x86/kern_impl.h"
-#elif defined(ARCH_ARM64)
+#elif defined(ARCH_ARM64) && CPU_IS_LITTLE_ENDIAN()
 #  include "arm/kern_impl.h"
 #endif
 

@@ -12,6 +12,13 @@
  * It defines the five kernels of kern.h with that suffix; everything else in
  * it is static.  Every tier produces the same output.
  *
+ * The portable tier's SWAR code works on 8-byte words in little-endian order
+ * on every target: byte k of the input is bits 8k..8k+7, as lane k is in a
+ * vector tier's masks.  Native loads are converted with a byte swap that is
+ * a no-op on little-endian targets; a word of byte-wise results (zero_bytes,
+ * xor) is converted once, after the byte-wise operations, which do not depend
+ * on the order.
+ *
  * Kernels: the encoder's RLE1 input stage, MTF and zero-run coding and least
  * rotation; the decoder's symbol loop and bulk un-RLE1.
  */
@@ -121,7 +128,8 @@ run4_mask(const u8 *p)
 {
 	u64 a = load_u64_unaligned(p), b = load_u64_unaligned(p + 1),
 	    c = load_u64_unaligned(p + 2), d = load_u64_unaligned(p + 3);
-	return zero_bytes(a ^ b) & zero_bytes(b ^ c) & zero_bytes(c ^ d);
+	return le64_bswap(zero_bytes(a ^ b) & zero_bytes(b ^ c) &
+			  zero_bytes(c ^ d));
 }
 #  define RUN4_STEP  8
 #  define RUN4_SHIFT 3
@@ -137,7 +145,7 @@ run_length(const u8 *p, size_t avail, u8 c)
 	size_t L = 0;
 	u64 vc = 0x0101010101010101ULL * c;
 	while (L + 8 <= avail) {
-		u64 x = load_u64_unaligned(p + L) ^ vc;
+		u64 x = le64_bswap(load_u64_unaligned(p + L) ^ vc);
 		if (x)
 			return L + ((size_t)bsf64(x) >> 3);
 		L += 8;
@@ -355,14 +363,20 @@ put_zero_run(u16 *mtfv, s32 wr, s32 *mtf_freq, u32 z)
 			_mm_set1_epi16(1));
 		_mm_storeu_si128((__m128i *)(mtfv + wr), d);
 #else
-		u64 lo = (x & 1) | ((u64)((x >> 1) & 1) << 16) |
-			 ((u64)((x >> 2) & 1) << 32) |
-			 ((u64)((x >> 3) & 1) << 48);
-		u64 hi = ((x >> 4) & 1) | ((u64)((x >> 5) & 1) << 16) |
-			 ((u64)((x >> 6) & 1) << 32) |
-			 ((u64)((x >> 7) & 1) << 48);
-		memcpy(mtfv + wr, &lo, 8);
-		memcpy(mtfv + wr + 4, &hi, 8);
+		if (CPU_IS_LITTLE_ENDIAN()) {
+			/* four 16-bit digits per 8-byte store, lane 0 low */
+			u64 lo = (x & 1) | ((u64)((x >> 1) & 1) << 16) |
+				 ((u64)((x >> 2) & 1) << 32) |
+				 ((u64)((x >> 3) & 1) << 48);
+			u64 hi = ((x >> 4) & 1) | ((u64)((x >> 5) & 1) << 16) |
+				 ((u64)((x >> 6) & 1) << 32) |
+				 ((u64)((x >> 7) & 1) << 48);
+			memcpy(mtfv + wr, &lo, 8);
+			memcpy(mtfv + wr + 4, &hi, 8);
+		} else {
+			for (s32 i = 0; i < 8; i++)
+				mtfv[wr + i] = (u16)((x >> i) & 1);
+		}
 #endif
 	} else {
 		for (s32 i = 0; i < k; i++)
@@ -404,14 +418,20 @@ tail_move_to_front(mtf_list *lst, u8 c)
 	for (s32 k = 0;; k++) {
 		u64 w;
 		memcpy(&w, tail + 8 * k, 8);
+		if (!CPU_IS_LITTLE_ENDIAN())
+			w = bswap64(w);
 		u64 shifted = (w << 8) | carry, z = zero_bytes(w ^ vc);
 		if (z) {
 			u64 upto = (z << 1) - 1;
 			w ^= (w ^ shifted) & upto;
+			if (!CPU_IS_LITTLE_ENDIAN())
+				w = bswap64(w);
 			memcpy(tail + 8 * k, &w, 8);
 			r = 8 + 8 * k + (s32)(bsf64(z) >> 3);
 			break;
 		}
+		if (!CPU_IS_LITTLE_ENDIAN())
+			shifted = bswap64(shifted);
 		memcpy(tail + 8 * k, &shifted, 8);
 		carry = w >> 56;
 	}
@@ -503,6 +523,8 @@ ADD_SUFFIX(bzng_mtf)(const u8 *L, s32 n, const u8 *in_use, u16 *mtfv,
 		list[i] = filler;
 	mtf_list lst;
 	memcpy(&lst.head, list, 8);
+	if (!CPU_IS_LITTLE_ENDIAN())
+		lst.head = bswap64(lst.head);
 	memcpy(lst.tail, list + 8, 248);
 	memset(lst.tail + 248, filler, 8);
 
@@ -607,8 +629,8 @@ common_prefix(const u8 *tt, s32 a, s32 b, s32 k, s32 n)
 	return n;
 #else
 	while (k + 8 <= n) {
-		u64 x = load_u64_unaligned(tt + a + k) ^
-			load_u64_unaligned(tt + b + k);
+		u64 x = le64_bswap(load_u64_unaligned(tt + a + k) ^
+				   load_u64_unaligned(tt + b + k));
 		if (x)
 			return k + (s32)(bsf64(x) >> 3);
 		k += 8;
@@ -978,7 +1000,7 @@ ADD_SUFFIX(bzng_symbols)(bzng_dstate *s, bzng_bits *br)
 	for (;;) {
 		/* fast groups */
 		while (s->group_pos == 0 &&
-		       br->end - br->p >= BZNG_FAST_IN_MARGIN &&
+		       BZNG_SPAN(br->p, br->end) >= BZNG_FAST_IN_MARGIN &&
 		       s->group_no + 1 < s->n_selectors) {
 			const bzng_htable *t =
 				&s->tab[s->selector[s->group_no + 1]];
@@ -1098,7 +1120,8 @@ unrle_candidates(const u8 *in, u8 *out)
 		  c = load_u64_unaligned(in + 2),
 		  d = load_u64_unaligned(in + 3);
 	memcpy(out, &a, 8);
-	return zero_bytes(a ^ b) & zero_bytes(a ^ c) & zero_bytes(a ^ d);
+	return le64_bswap(zero_bytes(a ^ b) & zero_bytes(a ^ c) &
+			  zero_bytes(a ^ d));
 }
 static inline void
 unrle_fill(u8 *out, u8 c, u32 total)

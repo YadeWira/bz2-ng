@@ -156,13 +156,21 @@ row_symbol(const bzng_dstate *s, u32 row)
 #define PMASK 0x000FFFFFu
 
 /*
+ * A 3-byte table entry is little-endian on every target: byte 0 holds bits
+ * 0-7, byte 1 bits 8-15 and byte 2 bits 16-23, of which bit 23 is the
+ * splitter mark.  build_t and mark_splitters address bytes 1 and 2 directly.
+ */
+
+/*
  * Stores v (< 2^24) as entry j with one 4-byte store; byte 3j+3 (the next
  * entry's low byte, or padding) is overwritten with zero.
  */
 static inline void
 store3w(u8 *p3, u32 j, u32 v)
 {
-	memcpy(p3 + 3 * (size_t)j, &v, 4); /* little-endian */
+	const u32 le = le32_bswap(v);
+
+	memcpy(p3 + 3 * (size_t)j, &le, 4);
 }
 
 /* Entry j of a 3-byte table (reads one pad byte past the end). */
@@ -170,9 +178,8 @@ static inline u32
 load3(const u8 *p3, u32 j)
 {
 	u32 e;
-	memcpy(&e, p3 + 3 * (size_t)j,
-	       4); /* little-endian; one pad byte past the end */
-	return e & 0x00FFFFFFu;
+	memcpy(&e, p3 + 3 * (size_t)j, 4);
+	return le32_bswap(e) & 0x00FFFFFFu;
 }
 
 /*

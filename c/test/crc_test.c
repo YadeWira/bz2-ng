@@ -19,9 +19,9 @@
 
 #include "crc32.h"
 #include "test_tier.h"
-#if defined(ARCH_X86_64)
+#if BZNG_X86_TIERS
 #  include "x86/cpu_features.h"
-#elif defined(ARCH_ARM64)
+#elif defined(ARCH_ARM64) && CPU_IS_LITTLE_ENDIAN()
 #  include "arm/cpu_features.h"
 #endif
 
@@ -137,10 +137,10 @@ main(void)
 	check_tables();
 	check_kernel("slice16", bzng_crc32_slice16);
 	check_kernel("dispatched", bzng_crc32);
-#if defined(ARCH_ARM64)
+#if defined(ARCH_ARM64) && CPU_IS_LITTLE_ENDIAN()
 	if (HAVE_CRC32(get_arm_cpu_features()))
 		check_kernel("armv8", bzng_crc32_armv8);
-#elif defined(ARCH_X86_64)
+#elif BZNG_X86_TIERS
 	if (HAVE_PCLMULQDQ(get_x86_cpu_features()))
 		check_kernel("pclmul", bzng_crc32_pclmul);
 	if (HAVE_X86_V3(get_x86_cpu_features()) &&

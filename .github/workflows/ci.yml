@@ -3,9 +3,23 @@ name: CI
 # Runs when started by hand and when the library changes on main, not on every
 # push: minutes on a private repository are billed, so branches are tested
 # locally and CI is started deliberately at milestones (Actions tab, or
-# `gh workflow run ci.yml --ref <branch>`).
+# `gh workflow run ci.yml --ref <branch>`). Started by hand it can run one
+# group of jobs alone (`-f jobs=windows`), which is how a fix to one job is
+# checked without paying for the others.
+#
+# CI adds what local runs lack: a machine with nothing installed, other CPUs,
+# and the sanitisers on Linux. It does not repeat the whole suite, which the
+# reference machines run in full (docs/spec.md section 6). Left out here: the
+# mutation tests, which are two fifths of the suite's time, and under the
+# sanitisers also the capacity tests and every tier but the vector one.
 on:
   workflow_dispatch:
+    inputs:
+      jobs:
+        description: The group of jobs to run
+        type: choice
+        default: all
+        options: [all, build-and-test, portability, windows, fuzz]
   push:
     branches: [main]
     paths:
@@ -21,42 +35,179 @@ permissions:
 
 jobs:
   build-and-test:
-    name: ${{ matrix.os }} / ${{ matrix.cc }}${{ matrix.suffix }}
+    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'build-and-test'
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         # Linux runners only: x86-64 exercises the scalar, SSE4 and AVX2
         # tiers, arm64 the scalar and NEON tiers. The tests iterate over
-        # every tier the runner's CPU supports.
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
-        cc: [gcc, clang]
-        cmake_args: [""]
-        suffix: [""]
+        # every tier the runner's CPU supports. Every build tests both
+        # decoder layouts, so the in-formula job runs only the tests that
+        # depend on which one is the library's default.
         include:
-          - os: ubuntu-24.04
+          - name: x86-64 / gcc
+            os: ubuntu-24.04
+            cc: gcc
+            ctest_args: "-E mutate"
+          - name: x86-64 / clang
+            os: ubuntu-24.04
+            cc: clang
+            ctest_args: "-E mutate"
+          - name: arm64 / gcc
+            os: ubuntu-24.04-arm
+            cc: gcc
+            ctest_args: "-E mutate"
+          - name: arm64 / clang
+            os: ubuntu-24.04-arm
+            cc: clang
+            ctest_args: "-E mutate"
+          - name: x86-64 / clang / sanitisers
+            os: ubuntu-24.04
             cc: clang
             cmake_args: "-DBZ2NG_SANITIZE=ON"
-            suffix: " / sanitisers"
-          - os: ubuntu-24.04-arm
+            ctest_args: "-E 'mutate|capacity|_(scalar|sse4)$'"
+          - name: arm64 / clang / sanitisers
+            os: ubuntu-24.04-arm
             cc: clang
             cmake_args: "-DBZ2NG_SANITIZE=ON"
-            suffix: " / sanitisers"
-          - os: ubuntu-24.04
+            ctest_args: "-E 'mutate|capacity|_scalar$'"
+          - name: x86-64 / gcc / in-formula decoder
+            os: ubuntu-24.04
             cc: gcc
             cmake_args: "-DBZ2NG_DECODER_IN_FORMULA=ON"
-            suffix: " / in-formula decoder"
-          - os: ubuntu-24.04
+            ctest_args: "-R 'memtest|tier_identity|abi_|bzip2_'"
+          - name: x86-64 / gcc / BZ_NO_STDIO
+            os: ubuntu-24.04
             cc: gcc
             cmake_args: "-DBZ2NG_NO_STDIO=ON"
-            suffix: " / BZ_NO_STDIO"
     steps:
       # The tests generate their own data, so the LFS corpora are not fetched.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S c -B c/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=${{ matrix.cc }} ${{ matrix.cmake_args }}
       - name: Build
         run: cmake --build c/build -j "$(nproc)"
+      # The sanitised tests are slow on a shared runner; CTest's default of
+      # 1500 s per test is too close to the longest of them.
       - name: Test
-        run: ctest --test-dir c/build -j "$(nproc)" --output-on-failure
+        run: ctest --test-dir c/build -j "$(nproc)" --output-on-failure --timeout 2400 ${{ matrix.ctest_args }}
+
+  # Big-endian and 32-bit targets, which have only the scalar tier, built on
+  # the x86-64 runner: s390x with Ubuntu's cross compiler, its test programs
+  # under QEMU user emulation; i686 with -m32, run natively. No other job can
+  # see a byte-order mistake: on a little-endian target every byte swap
+  # compiles away. The big-endian job leaves out the tests that take more
+  # than five minutes under emulation, and its per-test limit is short
+  # because a byte-order mistake can make the encoder loop without end.
+  portability:
+    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'portability'
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: s390x (big-endian, emulated) / gcc
+            packages: gcc-s390x-linux-gnu libc6-dev-s390x-cross binutils-multiarch qemu-user-binfmt
+            cmake_args: >-
+              -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=s390x
+              -DCMAKE_C_COMPILER=s390x-linux-gnu-gcc
+            qemu_ld_prefix: /usr/s390x-linux-gnu
+            ctest_args: "--timeout 600 -E 'mutate|valid|crafted|capacity|sort_oracle_form|cli_compare'"
+          - name: i686 (32-bit) / gcc
+            packages: gcc-multilib
+            cmake_args: -DCMAKE_C_FLAGS=-m32
+            ctest_args: "--timeout 2400 -E mutate"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+      - name: Configure
+        run: cmake -S c -B c/build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_args }}
+      - name: Build
+        run: cmake --build c/build -j "$(nproc)"
+      - name: Test
+        env:
+          QEMU_LD_PREFIX: ${{ matrix.qemu_ld_prefix }}
+        run: ctest --test-dir c/build -j "$(nproc)" --output-on-failure ${{ matrix.ctest_args }}
+
+  # Windows x86-64: cross-compiled with mingw-w64, the tests under Wine. Wine
+  # is registered as the kernel's handler for Windows executables, so CTest,
+  # CMake's script tests and the shell tests run them unchanged. The Wine
+  # server is started before CTest: started by a test, its long-lived
+  # processes would hold that test's output pipe open until the end of the run.
+  # The heaviest decoder and capacity phases run on the AVX2 tier only.
+  windows:
+    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'windows'
+    name: Windows x86-64 (mingw-w64, tests under Wine) / gcc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 wine64 wine
+      # Ubuntu's wine-binfmt package registers nothing on 24.04.
+      - name: Register Wine for Windows executables
+        run: |
+          test -e /proc/sys/fs/binfmt_misc/register || sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+          echo ':wine:M::MZ::/usr/bin/wine:' | sudo tee /proc/sys/fs/binfmt_misc/register
+      - name: Configure
+        run: >-
+          cmake -S c -B c/build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=x86_64
+          -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc
+      - name: Build
+        run: cmake --build c/build -j "$(nproc)"
+      - name: Test
+        env:
+          WINEPREFIX: ${{ runner.temp }}/wine
+          WINEDEBUG: -all
+        # wineserver does not start without the prefix's directory.
+        run: |
+          mkdir -p "$WINEPREFIX"
+          wineserver -p < /dev/null > /dev/null 2>&1
+          wineboot -u < /dev/null > /dev/null 2>&1
+          ctest --test-dir c/build -j "$(nproc)" --output-on-failure --timeout 2400 -E 'mutate|(valid|crafted|capacity)_(scalar|sse4)'
+
+  # The fuzz targets (c/fuzz/), built and run from their generated seeds for
+  # 90 s each, 30 s per kernel tier of the runner. Long campaigns run on the
+  # reference machines with the same script.
+  fuzz:
+    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'fuzz'
+    name: fuzz / ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      # libFuzzer's runtime is in libclang-rt-18-dev.
+      - name: Install clang 18 with libFuzzer
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-18 libclang-rt-18-dev
+      # sort_form_gcc is the sorter as gcc builds compile it, which no clang
+      # build otherwise runs.
+      - name: Fuzz
+        run: |
+          status=0
+          for t in decompress compress sort sort_form_gcc; do
+            c/fuzz/campaign.sh -l none -o "$RUNNER_TEMP/fuzz" -j "$(nproc)" -s 30 "$t" 90 || status=1
+          done
+          exit $status
+      - name: Keep the inputs that failed
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fuzz-artifacts-${{ matrix.arch }}
+          path: ${{ runner.temp }}/fuzz/artifacts

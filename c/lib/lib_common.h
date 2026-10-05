@@ -17,11 +17,15 @@
 #include "common_defs.h"
 
 /*
- * The 3-byte decoder table, the encoder's unit stores and the SWAR scans
- * assume little-endian byte order.
+ * Whether the x86-64 kernel tiers and their CRC kernels are built.
+ * CMakeLists.txt gives their translation units the tiers' instruction-set
+ * flags only where pointers are 8 bytes, so x32 (x86-64 with 4-byte
+ * pointers) runs the portable tier.
  */
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
-#  error "bz2-ng currently supports little-endian targets only"
+#if defined(ARCH_X86_64) && UINTPTR_MAX > 0xffffffffu
+#  define BZNG_X86_TIERS 1
+#else
+#  define BZNG_X86_TIERS 0
 #endif
 
 /*

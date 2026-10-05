@@ -22,7 +22,7 @@ bz2-ng is a drop-in replacement for libbz2 1.0.8 with a much faster single-threa
 ### 2.1 API and ABI
 
 - The public header is libbz2 1.0.8's `bzlib.h`, unmodified.
-- The library exports exactly the 24 public functions of `libbz2.def` (six low-level, eight `FILE*`-layer, two buffer-to-buffer, `BZ2_bzlibVersion`, and the seven zlib-style `BZ2_bz*open/read/write/flush/close/error` wrappers), enforced by a version script or export list. [E §2a]
+- The library exports exactly the 24 public functions of `libbz2.def` (six low-level, eight `FILE*`-layer, two buffer-to-buffer, `BZ2_bzlibVersion`, and the seven zlib-style `BZ2_bz*open/read/write/flush/close/error` wrappers), enforced by a version script, an export list, or on Windows a module-definition file that also keeps the names undecorated on 32-bit x86, as libbz2's own `libbz2.def` does. [E §2a, M2c]
 - `bz_stream` layout, the `BZ_*` constants and return codes, `BZ_MAX_UNUSED`, and `BZ_API` (`WINAPI` on Windows) are unchanged. `EState`, `DState` and `bzFile` are private and free to change.
 - `BZ_NO_STDIO` builds are supported: no `FILE*` layer, no diagnostics, and the integrator supplies `bz_internal_error`.
 - `BZ2_bzlibVersion()` returns a string that begins `1.0.8, ` so that callers which parse a leading version keep working; the bz2-ng version follows the comma. [E §2a]
@@ -51,11 +51,11 @@ Every kernel tier (§4.5) produces the same bytes; output never depends on the C
 
 | | Documented by libbz2 | bz2-ng |
 |---|---|---|
-| Compression | 400 kB + 8 × block size | inside the formula at every level: 8 × block size + 84,639 bytes, measured [M1] |
+| Compression | 400 kB + 8 × block size | inside the formula at every level: 8 × block size + 84,623 bytes on 64-bit targets and 40–50 bytes less on 32-bit ones, measured [M1, M2a] |
 | Decompression | 100 kB + 4 × block size | one block and 5 kB more by default: 105 kB + 5 × block size; an in-formula layout is a build option; see below |
 | Decompression, `small` | 100 kB + 2.5 × block size | inside the formula at every level |
 
-Memory is measured through a counting `bzalloc` in the test suite, at every level, and a build that exceeds its stated bound fails. [J §2, K §3]
+Memory is measured through a counting `bzalloc` in the test suite, at every level, and a build that exceeds its stated bound fails. [J §2, K §3] The bounds are the same on 32-bit targets; there the peaks are 40–80 bytes lower, because the state structures hold smaller pointers. [M2a]
 
 **Decoder layout rule.** A layout with 4-byte table entries throughout needs one more block than libbz2 documents (about 900 kB at level 9). It also walks 24 chains rather than 16 on blocks of at least 65,536 rows, which takes 8,224 bytes more working space and moves the fixed part of its bound from 100 kB to 105 kB [M1d]; the in-formula layout keeps 16 chains and its bound. One extra block is an acceptable price for speed, but only if nothing else recovers it. Measured in the library with native kernels in place, the 4-byte layout is 3–5% faster on full-size blocks on the M4 and 3–13% faster on the servers, and equal on smaller blocks [M1 §6], so it is the default and is listed in §2.5. The in-formula layout (3-byte entries above three quarters of the level's block size) stays available as a build option for callers that size memory pools by libbz2's formula. A cache-line-aligned 3-byte table is still to be tried (§7, M3); if it reaches the same speed inside the formula, the default returns to the formula.
 
@@ -85,25 +85,19 @@ Output and memory are fixed by §2, so "better" is speed. The reference is libbz
 
 **When a change gains in one place and loses in another.** The pairings that count most are clang on AArch64 and gcc on x86-64. A small loss with gcc on AArch64 or with clang on x86-64 is acceptable in exchange for a gain on one of those pairings, and is recorded with its figures. Requirement 1 holds on every pairing regardless.
 
-**Where the prototypes stand**
+**Where the library stands**
 
-Best measured, level 9, MB/s with the multiple of libbz2 on the same machine. One-shot prototypes with libsais as the sorter, clang builds. [P]
+Measured at level 9 through the legacy API with the shipping configuration (the project's own sorter, the default decoder layout), MB/s with the multiple of libbz2 built by the same compiler, on the pairing that counts most for each machine. [M3a]
 
-| Data | M4 Max enc / dec | Zen 5 enc / dec | Granite Rapids enc / dec | Graviton4 enc / dec |
+| Data | M4 Max, Apple clang enc / dec | Zen 5, gcc enc / dec | Granite Rapids, gcc enc / dec | Graviton4, clang enc / dec |
 |---|---|---|---|---|
-| MC:Z, 640 kB streams | 66.5 (7.0×) / 446 (4.3×) | 79.1 (9.4×) / 419 (4.4×) | 62.1 (9.6×) / 250 (3.8×) | 52.2 (8.2×) / 212 (3.0×) |
-| XA:Z, 1.65 MB streams | 72.2 (3.3×) / 284 (4.3×) | 68.9 (3.5×) / 250 (4.3×) | 55.4 (3.4×) / 167 (3.9×) | 47.9 (2.9×) / 136 (3.1×) |
-| Silesia, 12 files | 63.1 (3.0×) / 230 (3.7×) | 60.4 (3.1×) / 192 (3.5×) | 49.7 (3.1×) / 139 (3.6×) | 43.6 (2.8×) / 120 (3.1×) |
+| MC:Z, 640 kB streams | 88.8 (8.8×) / 450 (4.1×) | 70.0 (8.4×) / 402 (4.5×) | 60.9 (9.1×) / 263 (4.1×) | 52.9 (8.4×) / 227 (3.3×) |
+| XA:Z, 1.65 MB streams | 67.6 (2.9×) / 283 (3.9×) | 50.8 (2.6×) / 214 (4.0×) | 42.0 (2.5×) / 162 (4.0×) | 41.8 (2.5×) / 136 (3.9×) |
+| Silesia, 12 files | 60.5 (2.7×) / 236 (3.5×) | 46.4 (2.4×) / 182 (3.7×) | 38.7 (2.4×) / 139 (3.8×) | 38.4 (2.5×) / 121 (4.5×) |
 
-Shipping configuration: the project's own sorter, behind the legacy API, inside the documented memory. Encode figures for the M4 and Graviton4 are measured [T]; the x86 encode figures are the table above multiplied by the measured end-to-end ratio of the two sorters [T], so they are projections. The legacy API costs the encoder nothing at calls of 5,000 bytes or more [K]. Decode on the M4 is measured through the legacy API [J]; server decode is expected at 0.93–1.00 of the table above (the cost of the in-formula layout on full blocks) and has not been measured with native x86 kernels behind the API.
+Requirement 1 holds in every cell measured, including 16 kB streams, both decoder layouts and both compilers on each server; the lowest multiple is 1.61 (Graviton4, MC:Z in 16 kB streams, decompression). Three things qualify the table. With gcc on x86-64 the library runs at 0.91–0.98 of its clang build for compression and 0.80–0.97 for decompression, which M3 takes up first. On Graviton4 the decompression multiples for XA:Z and Silesia were about 3 when M1 was measured: libbz2 itself decodes large blocks about a quarter more slowly there since the machine's kernel build changed, for a reason not established [M3a §4]. And the legacy API costs the encoder nothing at calls of 5,000 bytes or more [K].
 
-| Data | M4 Max enc | Zen 5 enc (projected) | Granite Rapids enc (projected) | Graviton4 enc | M4 Max dec |
-|---|---|---|---|---|---|
-| MC:Z, 640 kB streams | 74.9 (7.9×) | 70 (8.3×) | 58 (8.9×) | 49.0 (7.7×) | 4.0× |
-| XA:Z, 1.65 MB streams | 58.7 (2.7×) | 54 (2.7×) | 44 (2.7×) | 38.3 (2.3×) | 4.0× |
-| Silesia, 12 files | 53.5 (2.5×) | 50 (2.6×) | 40 (2.6×) | 36.2 (2.4×) | 3.5× |
-
-Two caveats apply to every number above. They are clang builds; gcc 13 builds of the same code are 2–31% slower in a few identifiable loops [P §7.6], and requirement 1 applies to gcc builds too. And the sorter is still being improved (§7, M3).
+For scale, bzip2 level 9 output on these sets is 20–32% smaller than libdeflate's at gzip level 5, which compresses two to seven times faster than bz2-ng and decompresses five to twelve times faster. [M3a §3]
 
 ## 4. Architecture
 
@@ -177,7 +171,7 @@ All stages are exact integer computations. Tests require every tier available on
 
 ### 4.7 Portability
 
-C11, no compiler extensions without a fallback. Little- and big-endian, 32- and 64-bit. gcc, clang and MSVC. Platforms without a vector tier run the scalar tier and must still meet §3.
+C11, no compiler extensions without a fallback. Little- and big-endian, 32- and 64-bit: the suite passes under emulation on s390x (64-bit big-endian), i386, armv7 and mips (32-bit; mips is big-endian and traps misaligned word accesses), and every target gives the same bytes [M2a]. gcc, clang and MSVC. Platforms without a vector tier run the scalar tier, as does big-endian AArch64, since the NEON tier assumes little-endian lane order. x32 (x86-64 with 32-bit pointers) builds the scalar tier only; a selection of the suite passes for it under full-system emulation, and it has not run on hardware [M2e]. Windows on x86-64 and i686 builds with mingw-w64 and passes the suite under Wine, and a program built against stock libbz2's DLL runs unchanged with bz2-ng's; nothing has run on Windows itself, and MSVC has not been built: M2c §5 lists what it would need [M2c]. They must still meet §3, which has not yet been measured on any of them.
 
 ### 4.8 Code style
 
@@ -189,14 +183,15 @@ Deferred until after the drop-in is complete (§7, M5). It adds no speed; its va
 
 ## 5. Verification
 
-- **Differential conformance.** A tester links stock libbz2 1.0.8 under renamed symbols beside bz2-ng and drives both with identical call sequences, comparing return code, stream pointers, totals and bytes after every call. Compression: every split point for small inputs, random `RUN`/`FLUSH`/`FINISH` sequences, output space down to zero, inputs around block capacity, every level. Decompression: every input and output split for small streams, both `small` settings, mutated and truncated streams, concatenated streams through `BZ2_bzRead`, allocation failures. [J §4, K §5]
+- **Differential conformance.** A tester links stock libbz2 1.0.8 under renamed symbols beside bz2-ng and drives both with identical call sequences, comparing return code, stream pointers, totals and bytes after every call. Compression: every split point for small inputs, random `RUN`/`FLUSH`/`FINISH` sequences, output space down to zero, inputs around block capacity, every level. Decompression: every input and output split for small streams, both `small` settings, mutated and truncated streams, concatenated streams through `BZ2_bzRead`, allocation failures. [J §4, K §5] A generated input whose Huffman codes exceed libbz2's 17-bit limit covers the code-length limiting, which ordinary inputs seldom reach and no other differential test does. [M2d]
 - **Cross-decoding.** Everything bz2-ng writes is decoded by stock libbz2, and the reverse.
 - **Sorter.** Output compared with an independent oracle (cyclic prefix doubling, itself checked against a naive rotation sort) on generated families: exhaustive small alphabets, every short length, Fibonacci and Thue–Morse words, de Bruijn sequences, long runs, periodic and near-periodic blocks, worst-case inputs for the workspace bound, random lengths to the maximum block. [T §4]
 - **Every tier.** All of the above run for each kernel tier the machine supports, and tiers are compared with each other.
-- **Sanitisers and fuzzing.** The suites run under AddressSanitizer and UndefinedBehaviorSanitizer. Fuzz targets for the decoder, the encoder and the sorter run differentially against libbz2 or the oracle.
+- **Byte order and word size.** The suite runs on a big-endian and a 32-bit target under emulation, and the same generated inputs give the same bytes there as on the reference machines. [M2a] On 32-bit targets a test decodes from one input buffer longer than `PTRDIFF_MAX`, call for call against libbz2. [M2e]
+- **Sanitisers and fuzzing.** The suites run under AddressSanitizer and UndefinedBehaviorSanitizer. Fuzz targets for the decoder, the encoder and the sorter (`c/fuzz/`, built with `BZ2NG_BUILD_FUZZ`) run differentially against libbz2 or the oracle, on every tier of the machine; each has been shown to find faults planted in the library. [M2b]
 - **Memory.** Counting-allocator tests against the formulas of §2.4 at every level.
 - **Drop-in tests.** bzip2's own `make test`; the `bzip2` program built against bz2-ng compared with stock bzip2 across option combinations (stdout, stderr, exit status); CPython's `test_bz2` with the library preloaded; further downstream suites before release (§7, M4).
-- **ABI.** The exported symbol list is checked against the 24; `bz_stream` layout is checked by a compile-time test.
+- **ABI.** The exported symbol list is checked against the 24, on Windows from the DLL's export table; `bz_stream` layout is checked by a compile-time test.
 - **Code review.** Library changes are reviewed by independent reviewers against this specification and the house style (§4.8) before they merge; the differential testers, not review, are the evidence of correctness.
 - **Tests generate their data.** The corpora are for benchmarks and bulk checks; unit and conformance tests build their inputs in code.
 
@@ -204,7 +199,8 @@ Deferred until after the drop-in is complete (§7, M5). It adds no speed; its va
 
 - CMake is the build system, producing a static and a shared library, the `bzip2` and `bzip2recover` programs from libbz2's unmodified sources, and `bzip2.pc`.
 - The build stays simple enough for another build system to reproduce from a short description, because the bindings compile the C sources directly: a flat list of sources, per-tier compiler flags confined to the tier translation units, no generated code, and CPU features detected at run time rather than at configure time.
-- CI builds and tests with **both gcc and clang** on Linux x86-64 and AArch64, with sanitiser jobs, a `BZ_NO_STDIO` job, and emulated big-endian and 32-bit jobs. Windows follows in M2. macOS is covered by local runs, not hosted runners. CI runs when started deliberately at milestones and on merges to `main`, not on every push.
+- CI builds and tests with **both gcc and clang** on Linux x86-64 and AArch64, with sanitiser jobs, a `BZ_NO_STDIO` job, an emulated big-endian job (s390x, cross-compiled, its tests under QEMU), a 32-bit job (i686, run natively on the x86-64 runner), a job that runs each fuzz target briefly from its generated seeds, and a Windows job (x86-64, cross-compiled with mingw-w64, its tests under Wine). macOS is covered by local runs, not hosted runners. CI runs when started deliberately at milestones and on merges to `main`, not on every push.
+- CI does not repeat the whole suite. It leaves out the mutation tests; its sanitiser jobs run one vector tier without the capacity tests; the big-endian job leaves out the tests that take more than five minutes under emulation; and the Windows job runs the heaviest decoder and capacity phases on the AVX2 tier only. A run of the twelve jobs other than the Windows one costs about 130 minutes of runner time (measured: ten to twelve minutes for each AArch64 job, 18 to 22 for each full x86-64 job, ten and twelve for the 32-bit and big-endian jobs, and seven for each fuzz job). The Windows job takes 17 minutes on a hosted runner (measured once: 60 tests, of which the test step is 934 s), which brings a full run to about 150 minutes. The whole suite runs on the reference machines: as built for release for every change to the library, and under the sanitisers at each milestone; it runs under emulation for a big-endian and a 32-bit target, and the long fuzzing campaigns run, at milestones too. The big-endian job is the only one that can see a byte-order mistake, since on a little-endian target every byte swap compiles away [M2a §10].
 - A performance job on fixed reference machines compares against libbz2 for release candidates, for gcc and clang builds: the distribution's default version of each and the latest release of each.
 
 ## 7. Milestones
@@ -219,7 +215,7 @@ Deferred until after the drop-in is complete (§7, M5). It adds no speed; its va
 
 **M1 outcome.** The library is in `c/` [M1]. Conformance, drop-in tests, memory and "never slower" are met on all four reference machines with gcc and clang. Speed is within 3% of the prototypes on the M4 and for Graviton4 encode; x86 encode is 3–5% under the projection of §3, and four server decode cells are at 0.83–0.92 of the one-shot prototype, which M3 takes up (walk chains, prefetch, and the gcc-specific loop shapes of report P2).
 
-**Since M1.** The cross-review's findings are fixed [M1b]. The sorter's later scan forms are in the library: level 9 compression with gcc is 6–9% faster on text on the x86 servers, and unchanged to 4% faster elsewhere [M1c]. The decoder's symbol loop under gcc, 24 walk chains and walk prefetch are in: level 9 decompression of full-size blocks in the default layout is 7–21% faster on the three servers with gcc and clang and about 1% faster on the M4, with 16 KiB streams unchanged to 13% faster [M1d]. The slowest of the four M1 decode cells (Granite Rapids, MC:Z, clang) is traced to the table build and recovered. Writing the table entry before the cursor gains about 8% there and costs nothing elsewhere [M1f]. Loading all four cursors before any table store gains a further 14–16% there and ends a slow mode on small streams; it is neutral on the M4 and Graviton4, costs 0.4–1.2% on MC:Z with clang on Zen 5, and leaves gcc builds unchanged [M1g].
+**Since M1.** The cross-review's findings are fixed [M1b]. The sorter's later scan forms are in the library: level 9 compression with gcc is 6–9% faster on text on the x86 servers, and unchanged to 4% faster elsewhere [M1c]. The decoder's symbol loop under gcc, 24 walk chains and walk prefetch are in: level 9 decompression of full-size blocks in the default layout is 7–21% faster on the three servers with gcc and clang and about 1% faster on the M4, with 16 KiB streams unchanged to 13% faster [M1d]. The slowest of the four M1 decode cells (Granite Rapids, MC:Z, clang) is traced to the table build and recovered. Writing the table entry before the cursor gains about 8% there and costs nothing elsewhere [M1f]. Loading all four cursors before any table store gains a further 14–16% there and ends a slow mode on small streams; it is neutral on the M4 and Graviton4, costs 0.4–1.2% on MC:Z with clang on Zen 5, and leaves gcc builds unchanged [M1g]. Big-endian and 32-bit targets build and pass the suite (s390x, i386, armv7 and mips under emulation), with the objects of little-endian 64-bit builds unchanged [M2a]. The fuzz targets exist, and a first campaign of an hour per target on AArch64 (0.7 to 0.9 million executions each) found nothing, and neither did four hours per target on Zen 5, over every x86-64 tier, and on Graviton4 (1.2 to 3.2 million executions per target and machine) [M2b §13]. The Huffman code-length limit, which no differential test reached, has a test of its own [M2d]. On 32-bit targets the decoder no longer forms pointer differences past `PTRDIFF_MAX`, and x32 builds [M2e]. Windows builds with mingw-w64 and passes the suite under Wine on x86-64, every tier included; the DLL exports exactly the 24 functions, undecorated, and replaces stock libbz2's DLL without relinking [M2c].
 
 **Before any public release:** the sorter's provenance record is complete and reviewed (§8, open decision D5); licence statements for the benchmark data are verified; libsais, SIMDe and other spike-only code are confirmed absent from the library.
 

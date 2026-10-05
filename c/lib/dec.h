@@ -117,6 +117,20 @@ typedef struct bzng_bits {
 } bzng_bits;
 
 /*
+ * hi - lo in bytes, for lo <= hi in one caller's buffer.  A pointer difference
+ * is defined only up to PTRDIFF_MAX, and a 32-bit process can be handed a
+ * longer buffer, so there the count is taken from the addresses.  With 64-bit
+ * pointers no buffer comes near PTRDIFF_MAX, so the pointer difference is
+ * used: gcc on x86-64 allocates registers in the symbol loop differently for
+ * the address form.
+ */
+#if UINTPTR_MAX > 0xffffffffu
+#  define BZNG_SPAN(lo, hi) ((hi) - (lo))
+#else
+#  define BZNG_SPAN(lo, hi) ((uintptr_t)(hi) - (uintptr_t)(lo))
+#endif
+
+/*
  * Decompression state; replaces libbz2's DState. Allocated through bzalloc
  * with slack and aligned internally (lib_common.h); raw is what bzfree gets.
  */

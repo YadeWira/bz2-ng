@@ -83,6 +83,11 @@ foreach(_suite api edge capacity wrappers)
 endforeach()
 bzng_tier_test(enc_random $<TARGET_FILE:enc_difftest> -r 3000 random)
 
+# The Huffman code-length limit, on an input built to need it.  The Huffman
+# stage has no kernel tier (lib/enc_huff.c), so it runs once.
+bzng_test_program(huff_limit_test huff_limit_test.c)
+add_test(NAME enc_huff_limit COMMAND huff_limit_test)
+
 bzng_test_program(memtest memtest.c)
 target_compile_definitions(memtest PRIVATE BZNG_DEFAULT_LAYOUT=${BZ2NG_DEFAULT_LAYOUT})
 add_test(NAME memtest COMMAND memtest)
@@ -99,6 +104,13 @@ foreach(_name fit wide)
   endforeach()
   bzng_tier_test(dec_${_name}_mutate $<TARGET_FILE:dec_difftest_${_name}> -q -n 1500 mutate)
 endforeach()
+
+# One input buffer longer than PTRDIFF_MAX, which only a 32-bit process can be
+# handed; the program reports itself skipped where pointers are 64-bit or the
+# buffer cannot be mapped.
+bzng_test_program(dec_bigbuf dec_bigbuf.c)
+add_test(NAME dec_input_over_2gib COMMAND dec_bigbuf)
+set_tests_properties(dec_input_over_2gib PROPERTIES SKIP_RETURN_CODE 77)
 
 bzng_test_program(sort_test sort_test.c)
 bzng_tier_test(sort_oracle $<TARGET_FILE:sort_test>)
@@ -140,7 +152,7 @@ set_tests_properties(tier_identity PROPERTIES SKIP_REGULAR_EXPRESSION "fewer tha
 if(TARGET bz2_shared)
   add_test(NAME abi_exported_symbols
            COMMAND ${CMAKE_COMMAND} -DLIB=$<TARGET_FILE:bz2_shared> "-DEXPECTED=${BZ2NG_EXPORTED}"
-                   -P ${CMAKE_CURRENT_SOURCE_DIR}/exported_symbols.cmake)
+                   -DOBJDUMP=${CMAKE_OBJDUMP} -P ${CMAKE_CURRENT_SOURCE_DIR}/exported_symbols.cmake)
 endif()
 
 # bzip2's `make test`, and bzip2.c against stock libbz2 versus against bz2-ng.

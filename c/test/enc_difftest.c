@@ -27,6 +27,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef _WIN32
+#  include <errno.h>
+#  include <fcntl.h>
+#  include <io.h>
+#  include <process.h>
+#  include <sys/stat.h>
+#endif
 
 #include "bzlib.h"
 #include "kern.h"
@@ -84,9 +91,9 @@ rnd_below(size_t n)
 /* ---- the two implementations --------------------------------------------- */
 
 typedef struct {
-	int (*init)(bz_stream *, int, int, int);
-	int (*compress)(bz_stream *, int);
-	int (*end)(bz_stream *);
+	int(BZ_API(*init))(bz_stream *, int, int, int);
+	int(BZ_API(*compress))(bz_stream *, int);
+	int(BZ_API(*end))(bz_stream *);
 } api;
 
 static const api REF = {ref_BZ2_bzCompressInit, ref_BZ2_bzCompress,
@@ -1067,6 +1074,41 @@ suite_api(void)
 }
 
 /*
+ * A new temporary binary stream, removed when closed, as tmpfile() gives; NULL
+ * on failure.  Windows' tmpfile() is not safe for tests run in parallel: two
+ * processes started together can pick the same name (it then fails with
+ * EACCES under Wine), and Microsoft's C runtime puts the file in the root of
+ * the current drive.  So there the file is created exclusively in %TEMP%,
+ * named after the process, and deleted when its descriptor is closed.
+ */
+static FILE *
+temp_stream(void)
+{
+#ifdef _WIN32
+	static unsigned serial;
+	const char *dir = getenv("TEMP");
+	char path[1024];
+
+	if (dir == NULL)
+		dir = ".";
+	for (;;) {
+		snprintf(path, sizeof path, "%s/bzng_enc_%d_%u.tmp", dir,
+			 _getpid(), serial++);
+		int fd = _open(path,
+			       _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY |
+				       _O_TEMPORARY,
+			       _S_IREAD | _S_IWRITE);
+		if (fd >= 0)
+			return _fdopen(fd, "w+b");
+		if (errno != EEXIST)
+			return NULL;
+	}
+#else
+	return tmpfile();
+#endif
+}
+
+/*
  * BZ2_bzBuffToBuffCompress (incl. a too-small output) and BZ2_bzWrite* with
  * random write sizes, stock wrappers over each library.
  */
@@ -1136,7 +1178,11 @@ suite_wrappers(void)
 			free(oa);
 			free(ob);
 			/* BZ2_bzWrite to a temporary file. */
-			FILE *fa = tmpfile(), *fb = tmpfile();
+			FILE *fa = temp_stream(), *fb = temp_stream();
+			if (fa == NULL || fb == NULL) {
+				perror("temporary file");
+				exit(2);
+			}
 			int ea, eb;
 			BZFILE *wa = ref_BZ2_bzWriteOpen(&ea, fa, level, 0, 0);
 			BZFILE *wb = BZ2_bzWriteOpen(&eb, fb, level, 0, 0);

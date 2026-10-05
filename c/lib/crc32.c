@@ -36,9 +36,9 @@ bzng_crc32_slice16(u32 crc, const u8 *p, size_t len)
 /* Include architecture-specific implementation(s) if available. */
 #undef DEFAULT_IMPL
 #undef arch_select_crc32_func
-#if defined(ARCH_ARM64)
+#if defined(ARCH_ARM64) && CPU_IS_LITTLE_ENDIAN()
 #  include "arm/crc32_impl.h"
-#elif defined(ARCH_X86_64)
+#elif BZNG_X86_TIERS
 #  include "x86/crc32_impl.h"
 #endif
 

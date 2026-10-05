@@ -3,8 +3,8 @@
  *
  * CRC-32/BZIP2 with the AArch64 CRC32 instructions. Compiled with the CRC
  * extension enabled for this file only (-march=armv8-a+crc); the dispatch
- * calls it only when the CPU reports the instructions. Elsewhere this file
- * compiles to nothing.
+ * calls it only when the CPU reports the instructions. Elsewhere, and on
+ * big-endian AArch64 (kern.h), this file compiles to nothing.
  *
  * The instructions compute the reflected CRC-32 with the same polynomial, so
  * the register is bit-reversed on entry and exit and the bits of every input
@@ -14,7 +14,7 @@
  */
 #include "../crc32.h"
 
-#ifdef ARCH_ARM64
+#if defined(ARCH_ARM64) && CPU_IS_LITTLE_ENDIAN()
 #  include <arm_acle.h>
 
 /* x with the bits of every byte reversed and the byte order kept. */

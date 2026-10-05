@@ -13,6 +13,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#  include <fcntl.h>
+#  include <io.h>
+#endif
 
 #include "reference_api.h"
 
@@ -43,6 +47,14 @@ read_all(FILE *f, size_t *n)
 int
 main(int argc, char **argv)
 {
+#ifdef _WIN32
+	/*
+	 * Every output is compared byte for byte, and rand-compress reads
+	 * binary data: no newline translation, and no end of input at 0x1A.
+	 */
+	_setmode(_fileno(stdin), _O_BINARY);
+	_setmode(_fileno(stdout), _O_BINARY);
+#endif
 	if (argc == 2 && strcmp(argv[1], "rand-compress") == 0) {
 		size_t n;
 		unsigned char *in = read_all(stdin, &n);
@@ -52,17 +64,19 @@ main(int argc, char **argv)
 
 		if (out == NULL) {
 			fprintf(stderr, "cli_tool: out of memory\n");
+			free(in);
 			return 2;
 		}
 		rc = rand_BZ2_bzBuffToBuffCompress((char *)out, &cl, (char *)in,
 						   (unsigned)n, 9, 0, 30);
-		if (rc != BZ_OK) {
+		if (rc == BZ_OK)
+			fwrite(out, 1, cl, stdout);
+		else
 			fprintf(stderr, "cli_tool: rand-compress failed (%d)\n",
 				rc);
-			return 1;
-		}
-		fwrite(out, 1, cl, stdout);
-		return 0;
+		free(out);
+		free(in);
+		return rc == BZ_OK ? 0 : 1;
 	}
 	if (argc == 4 && strcmp(argv[1], "flip") == 0) {
 		FILE *f = fopen(argv[2], "rb");
@@ -80,10 +94,12 @@ main(int argc, char **argv)
 				"cli_tool: bit %zu is past the end of "
 				"%s (%zu bytes)\n",
 				bit, argv[2], n);
+			free(buf);
 			return 1;
 		}
 		buf[bit / 8] ^= (unsigned char)(1 << (bit % 8));
 		fwrite(buf, 1, n, stdout);
+		free(buf);
 		return 0;
 	}
 	if (argc == 3 && strcmp(argv[1], "text") == 0) {

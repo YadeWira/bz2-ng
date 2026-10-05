@@ -8,12 +8,13 @@
  * x86-64-v3 (AVX2, BMI1, BMI2, FMA, LZCNT, MOVBE); the tier's CRC kernel is
  * x86/crc32_vpclmul.c on CPUs with VPCLMULQDQ, else x86/crc32_pclmul.c.
  * Compiled with -march=x86-64-v3 on x86-64, and selected only on CPUs with
- * those features.  Compiles to nothing on other architectures.
+ * those features.  Compiles to nothing elsewhere, x32 included
+ * (BZNG_X86_TIERS).
  */
 
 #include "../lib_common.h"
 
-#ifdef ARCH_X86_64
+#if BZNG_X86_TIERS
 #  define SUFFIX _avx2
 #  include "../kern_template.h"
 #else

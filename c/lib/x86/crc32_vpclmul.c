@@ -11,7 +11,7 @@
  */
 #include "../crc32.h"
 
-#ifdef ARCH_X86_64
+#if BZNG_X86_TIERS
 #  include <immintrin.h>
 
 #  include "crc32_clmul.h"

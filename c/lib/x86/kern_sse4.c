@@ -7,13 +7,13 @@
 /*
  * x86-64-v2 (SSE4.2, SSSE3, POPCNT); the tier's CRC kernel is
  * x86/crc32_pclmul.c.  Compiled with -march=x86-64-v2 on x86-64, and selected
- * only on CPUs with those features.  Compiles to nothing on other
- * architectures.
+ * only on CPUs with those features.  Compiles to nothing elsewhere, x32
+ * included (BZNG_X86_TIERS).
  */
 
 #include "../lib_common.h"
 
-#ifdef ARCH_X86_64
+#if BZNG_X86_TIERS
 #  define SUFFIX _sse4
 #  include "../kern_template.h"
 #else

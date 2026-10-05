@@ -21,6 +21,9 @@ option(BZ2NG_SANITIZE "Build everything with AddressSanitizer and UndefinedBehav
 option(BZ2NG_BUILD_PROGRAMS "Build the bzip2 and bzip2recover programs" ON)
 option(BZ2NG_BUILD_TESTS "Build the tests (CTest)" ON)
 option(BZ2NG_BUILD_BENCH "Build the benchmark tool" ON)
+option(BZ2NG_BUILD_FUZZ
+       "Build the libFuzzer targets in fuzz/ (clang with libFuzzer; everything built with ASan and UBSan; needs BZ2NG_BUILD_TESTS)"
+       OFF)
 option(BZ2NG_DECODER_IN_FORMULA
        "Decoder memory inside libbz2's documented 100 kB + 4 x block size (default: 105 kB + 5 x block size, faster on full-size blocks)"
        OFF)
@@ -39,6 +42,24 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 if(BZ2NG_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+# The fuzz build instruments everything, the reference libbz2 included, with
+# the sanitisers and libFuzzer's coverage; only the targets in fuzz/ link
+# libFuzzer itself.  Apple's clang has no libFuzzer, hence the check.
+if(BZ2NG_BUILD_FUZZ)
+  include(CheckCSourceCompiles)
+  set(CMAKE_REQUIRED_FLAGS -fsanitize=fuzzer)
+  check_c_source_compiles("
+    #include <stddef.h>
+    #include <stdint.h>
+    int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) { return 0; }"
+    BZ2NG_HAVE_LIBFUZZER)
+  unset(CMAKE_REQUIRED_FLAGS)
+  if(NOT BZ2NG_HAVE_LIBFUZZER)
+    message(FATAL_ERROR "BZ2NG_BUILD_FUZZ needs a clang with libFuzzer (-fsanitize=fuzzer); Apple's clang has none")
+  endif()
+  add_compile_options(-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
@@ -126,7 +147,9 @@ endif()
 
 # Common settings of every compilation of the library sources.
 function(bzng_library_settings target)
-  target_include_directories(${target} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/lib)
+  # PROJECT_SOURCE_DIR, not the current directory: test/ calls this too, and
+  # a wrong path goes unnoticed wherever the system has a bzlib.h of its own.
+  target_include_directories(${target} PUBLIC ${PROJECT_SOURCE_DIR} PRIVATE ${PROJECT_SOURCE_DIR}/lib)
   # _DEFAULT_SOURCE: glibc hides POSIX functions (fdopen, used by the stdio
   # layer) under a strict -std=c11.
   target_compile_definitions(${target} PRIVATE BZNG_VERSION="${PROJECT_VERSION}" _FILE_OFFSET_BITS=64 _DEFAULT_SOURCE)
@@ -134,7 +157,7 @@ function(bzng_library_settings target)
     target_compile_definitions(${target} PUBLIC BZ_NO_STDIO)
   endif()
   # ASSERT (lib/lib_common.h) is compiled in for debug and sanitiser builds.
-  if(BZ2NG_SANITIZE)
+  if(BZ2NG_SANITIZE OR BZ2NG_BUILD_FUZZ)
     target_compile_definitions(${target} PRIVATE BZNG_ENABLE_ASSERTIONS)
   else()
     target_compile_definitions(${target} PRIVATE $<$<CONFIG:Debug>:BZNG_ENABLE_ASSERTIONS>)
@@ -188,13 +211,29 @@ if(BZ2NG_BUILD_SHARED AND NOT BZ2NG_NO_STDIO)
     endforeach()
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bz2.exports "${_list}")
     target_link_options(bz2_shared PRIVATE "LINKER:-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/bz2.exports")
-  elseif(NOT WIN32)
+  elseif(WIN32)
+    # A module-definition file, as libbz2's own libbz2.def: it also gives the
+    # names undecorated where WINAPI decorates them (32-bit x86).
+    set(_list "EXPORTS\n")
+    foreach(_sym IN LISTS BZ2NG_EXPORTED)
+      string(APPEND _list "  ${_sym}\n")
+    endforeach()
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bz2.def "${_list}")
+    target_sources(bz2_shared PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/bz2.def)
+  else()
     set(_list "")
     foreach(_sym IN LISTS BZ2NG_EXPORTED)
       string(APPEND _list "    ${_sym};\n")
     endforeach()
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bz2.map "{\n  global:\n${_list}  local:\n    *;\n};\n")
     target_link_options(bz2_shared PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_BINARY_DIR}/bz2.map")
+  endif()
+  # A drop-in DLL needs no GCC runtime DLL beside it (the portable tier calls
+  # libgcc's popcount).  On 32-bit x86 the .def file's undecorated names are
+  # matched to the stdcall-decorated functions, which is intended, so ld is
+  # told not to warn about it.
+  if(MINGW)
+    target_link_options(bz2_shared PRIVATE -static-libgcc "LINKER:--enable-stdcall-fixup")
   endif()
 endif()
 
@@ -257,6 +296,13 @@ elseif(BZ2NG_BUILD_TESTS)
   add_test(NAME no_stdio_round_trip COMMAND no_stdio_test)
   add_test(NAME no_stdio_symbols
            COMMAND ${CMAKE_COMMAND} -DLIB=$<TARGET_FILE:bz2_static> -P ${CMAKE_CURRENT_SOURCE_DIR}/test/no_stdio_symbols.cmake)
+endif()
+if(BZ2NG_BUILD_FUZZ)
+  # The seed generator reuses the tests' reference and randomising builds.
+  if(NOT BZ2NG_BUILD_TESTS OR BZ2NG_NO_STDIO)
+    message(FATAL_ERROR "BZ2NG_BUILD_FUZZ needs BZ2NG_BUILD_TESTS and the stdio layer")
+  endif()
+  add_subdirectory(fuzz)
 endif()
 if(BZ2NG_BUILD_BENCH AND BZ2NG_NO_STDIO)
   message(STATUS "bench: not built (it uses the stdio layer; BZ2NG_NO_STDIO is on)")

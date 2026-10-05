@@ -187,13 +187,14 @@ bzng_crc_repeat(u32 crc, u8 c, s32 len)
 
 /*
  * Writes one unit of len (1..255) copies of c at blk[nb] with one 8-byte
- * store (needs 8 bytes of room); returns the new block length.
+ * store (needs 8 bytes of room); returns the new block length.  The unit is
+ * built with its first byte lowest, and v holds it in memory order.
  */
 static inline s32
 bzng_put_unit(u8 *blk, s32 nb, u8 c, s32 len)
 {
 	u64 x = len >= 4 ? (u64)(len - 4) : c;
-	u64 v = (0x0000000001010101ULL * c) | (x << 32);
+	u64 v = le64_bswap((0x0000000001010101ULL * c) | (x << 32));
 	memcpy(blk + nb, &v, 8);
 	return nb + (len >= 4 ? 5 : len);
 }

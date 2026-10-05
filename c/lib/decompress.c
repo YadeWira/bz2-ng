@@ -409,7 +409,7 @@ decode(bzng_dstate *s, bzng_bits *br)
 		 */
 		s->i = 0;
 		while (s->i < s->n_selectors) {
-			if (br->cnt >= 8 || br->end - br->p >= 8) {
+			if (br->cnt >= 8 || BZNG_SPAN(br->p, br->end) >= 8) {
 				if (br->cnt < 8)
 					bzng_br_refill_fast(br);
 				u32 j = (u32)63 - bsr64(~br->buf | 1);
@@ -460,7 +460,8 @@ decode(bzng_dstate *s, bzng_bits *br)
 					cur = BZ_X_CODING_1;
 					if (s->curr < 1 || s->curr > 20)
 						RETURN(BZ_DATA_ERROR);
-					if (br->cnt < 2 && br->end - br->p >= 8)
+					if (br->cnt < 2 &&
+					    BZNG_SPAN(br->p, br->end) >= 8)
 						bzng_br_refill_fast(br);
 					if (br->cnt >= 2) {
 						const u32 two =
@@ -629,7 +630,7 @@ sync_input(bzng_dstate *s, bz_stream *strm, bzng_bits *br, const u8 *in0,
 {
 	if (!waiting) {
 		u32 give = br->cnt / 8;
-		const u32 read = in0 ? (u32)(br->p - in0) : 0;
+		const u32 read = in0 ? (u32)BZNG_SPAN(in0, br->p) : 0;
 		if (give > read)
 			give = read;
 		br->p -= give;
@@ -637,7 +638,7 @@ sync_input(bzng_dstate *s, bz_stream *strm, bzng_bits *br, const u8 *in0,
 	}
 	s->bit_cnt = br->cnt;
 	s->bit_buf = br->cnt ? br->buf & (~(u64)0 << (64 - br->cnt)) : 0;
-	const u32 used = in0 ? (u32)(br->p - in0) : 0;
+	const u32 used = in0 ? (u32)BZNG_SPAN(in0, br->p) : 0;
 	strm->next_in = (char *)br->p;
 	strm->avail_in -= used;
 	const u32 old = strm->total_in_lo32;
