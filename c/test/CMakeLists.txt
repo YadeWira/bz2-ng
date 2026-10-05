@@ -115,23 +115,20 @@ set_tests_properties(dec_input_over_2gib PROPERTIES SKIP_RETURN_CODE 77)
 bzng_test_program(sort_test sort_test.c)
 bzng_tier_test(sort_oracle $<TARGET_FILE:sort_test>)
 
-# The sorter's kernel forms (lib/sort.c) follow the compiler and target, so a
-# build of the library compiles one combination of them.  The oracle is also
-# built with its own lib/sort.c in each combination that some build ships,
-# which bz2_static's copy then gives way to at link time, so that every
-# machine tests all of them (apple_*: Apple silicon).  The sorter uses no
-# kernel tier, so each runs once.
-function(bzng_sort_form_test name mask_selects skip_empty_slots suffix0_apart branchless_naming)
-  bzng_test_program(sort_test_form_${name} sort_test.c ${PROJECT_SOURCE_DIR}/lib/sort.c)
-  target_compile_definitions(sort_test_form_${name} PRIVATE
-    SORT_MASK_SELECTS=${mask_selects} SORT_SKIP_EMPTY_SLOTS=${skip_empty_slots}
-    SORT_SUFFIX0_APART=${suffix0_apart} SORT_BRANCHLESS_NAMING=${branchless_naming})
-  add_test(NAME sort_oracle_form_${name} COMMAND sort_test_form_${name})
-endfunction()
-bzng_sort_form_test(apple_clang 0 0 0 1)
-bzng_sort_form_test(clang 0 0 1 0)
-bzng_sort_form_test(gcc 1 1 1 0)
-bzng_sort_form_test(apple_gcc 1 1 1 1)
+# The sorter (lib/sort_libsais.c).  The oracle again, with the allocator
+# libsais sees aborting (sort_libsais_trap.c, whose bzng_bwt takes the place
+# of the library's at link time), so that a block on which libsais would
+# allocate fails here; it has no kernel tier, so it runs once.  And no
+# libsais symbol visible from the libraries, and no allocator called by the
+# sorter's object.
+bzng_test_program(sort_test_sais_trap sort_test.c sort_libsais_trap.c)
+add_test(NAME sort_oracle_sais_trap COMMAND sort_test_sais_trap)
+set(_sais_args -DNM=${CMAKE_NM} -DSTATIC=$<TARGET_FILE:bz2_static>
+               "-DOBJ=$<FILTER:$<TARGET_OBJECTS:bz2_core_objects>,INCLUDE,sort_libsais>")
+if(TARGET bz2_shared)
+  list(APPEND _sais_args -DSHARED=$<TARGET_FILE:bz2_shared>)
+endif()
+add_test(NAME sais_symbols COMMAND ${CMAKE_COMMAND} ${_sais_args} -P ${CMAKE_CURRENT_SOURCE_DIR}/sais_symbols.cmake)
 
 bzng_test_program(crc_test crc_test.c)
 bzng_tier_test(crc $<TARGET_FILE:crc_test>)

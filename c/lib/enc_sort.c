@@ -4,7 +4,7 @@
  * Sorter bridge: the block's least rotation into the block sorter.
  *
  * The least rotation T' of a primitive block is a Lyndon word, whose suffix
- * order equals its rotation order, so the suffix sorter of sort.c on T'
+ * order equals its rotation order, so the suffix sorter behind sort.h on T'
  * yields bzip2's rotation order. For T = u^m (m > 1), T' = u'^m with u'
  * Lyndon; its rotation order is the suffix order of u' with each row
  * repeated m times, and any of the m tied rows is a valid origPtr (here: the

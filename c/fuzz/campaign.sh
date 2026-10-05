@@ -7,8 +7,7 @@
 # usage: fuzz/campaign.sh [-o WORKDIR] [-j JOBS] [-s SLICE] [-c CC]
 #                         [-l LOCKFILE] TARGET SECONDS
 #
-#   TARGET    decompress, compress, sort, or sort_form_<form> (apple_clang,
-#             clang, gcc, apple_gcc)
+#   TARGET    decompress, compress or sort
 #   SECONDS   wall-clock time to fuzz, shared among the kernel tiers
 #   -o        work directory (default ~/bz2ng-fuzz); kept between runs:
 #               build/                  the instrumented build
@@ -36,7 +35,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '7,33p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '7,32p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
@@ -62,8 +61,7 @@ shift $((OPTIND - 1))
 target=$1
 seconds=$2
 case $target in
-decompress | compress | sort | sort_form_apple_clang | sort_form_clang | \
-    sort_form_gcc | sort_form_apple_gcc) ;;
+decompress | compress | sort) ;;
 *)
     echo "campaign.sh: unknown target $target" >&2
     exit 2
@@ -90,8 +88,7 @@ build=$workdir/build
 corpus=$workdir/corpus/$target
 artifacts=$workdir/artifacts/$target
 seeds=$workdir/seeds
-# The seeds of the sorter's form variants are the sorter's.
-seed_dir=$seeds/${target%%_form_*}
+seed_dir=$seeds/$target
 binary=$build/fuzz/fuzz_$target
 
 echo "campaign.sh: building fuzz_$target with $cc in $build"

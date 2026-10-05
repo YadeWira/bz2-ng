@@ -117,7 +117,7 @@ jobs:
               -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=s390x
               -DCMAKE_C_COMPILER=s390x-linux-gnu-gcc
             qemu_ld_prefix: /usr/s390x-linux-gnu
-            ctest_args: "--timeout 600 -E 'mutate|valid|crafted|capacity|sort_oracle_form|cli_compare'"
+            ctest_args: "--timeout 600 -E 'mutate|valid|crafted|capacity|cli_compare'"
           - name: i686 (32-bit) / gcc
             packages: gcc-multilib
             cmake_args: -DCMAKE_C_FLAGS=-m32
@@ -196,12 +196,10 @@ jobs:
       # libFuzzer's runtime is in libclang-rt-18-dev.
       - name: Install clang 18 with libFuzzer
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-18 libclang-rt-18-dev
-      # sort_form_gcc is the sorter as gcc builds compile it, which no clang
-      # build otherwise runs.
       - name: Fuzz
         run: |
           status=0
-          for t in decompress compress sort sort_form_gcc; do
+          for t in decompress compress sort; do
             c/fuzz/campaign.sh -l none -o "$RUNNER_TEMP/fuzz" -j "$(nproc)" -s 30 "$t" 90 || status=1
           done
           exit $status

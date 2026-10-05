@@ -4,12 +4,12 @@
 #
 # The library is a flat list of C11 sources (BZ2NG_SOURCES). Every source is
 # compiled on every architecture; the ISA-specific ones compile to nothing
-# where they do not apply. Only the five ISA translation units get extra
-# flags, and only on their own architecture (bzng_isa_flags below); the run-
-# time dispatch (lib/kern.h, lib/crc32.c) calls them only on CPUs that have the
-# instructions. Nothing is generated at configure time except bzip2.pc and
-# the shared library's list of exported symbols (and, for the tests, the
-# randomising compressor of test/CMakeLists.txt).
+# where they do not apply. Only the five ISA translation units get
+# instruction-set flags, and only on their own architecture (bzng_isa_flags
+# below); the run-time dispatch (lib/kern.h, lib/crc32.c) calls them only on
+# CPUs that have the instructions. Nothing is generated at configure time
+# except bzip2.pc and the shared library's list of exported symbols (and, for
+# the tests, the randomising compressor of test/CMakeLists.txt).
 cmake_minimum_required(VERSION 3.16)
 project(bz2ng VERSION 0.1.0 LANGUAGES C)
 
@@ -97,7 +97,7 @@ set(BZ2NG_SOURCES
   lib/enc_block.c        # block core
   lib/enc_huff.c         # Huffman stage (contains libbz2 code)
   lib/enc_sort.c         # least rotation into the sorter
-  lib/sort.c             # block sorter (derived from sais-lite)
+  lib/sort_libsais.c     # block sorter: compiles third_party/libsais
   lib/decompress.c       # legacy decompression driver and header parser (derived from libbz2)
   lib/dec_block.c        # Huffman tables, inverse BWT, text source
   lib/randtable.c        # randomisation table (libbz2)
@@ -129,10 +129,11 @@ endfunction()
 bzng_isa_flags()
 
 # Optimisation: the encoder and sorter at -O3, everything else at -O2
-# (measured: the encoder and sorter are faster at -O3, the decoder and the
-# kernel tiers gain nothing from it).  Appended after the build type's flags,
-# so they win.
-set(BZ2NG_O3_SOURCES lib/compress.c lib/enc_block.c lib/enc_huff.c lib/enc_sort.c lib/sort.c)
+# (measured: the encoder is faster at -O3, the decoder and the kernel tiers
+# gain nothing from it; libsais is built as it was timed, and at -O2 it was
+# no different where that was tried, research/L3-libsais-gcc-aarch64.md).
+# Appended after the build type's flags, so they win.
+set(BZ2NG_O3_SOURCES lib/compress.c lib/enc_block.c lib/enc_huff.c lib/enc_sort.c lib/sort_libsais.c)
 
 set(BZ2NG_EXPORTED
   BZ2_bzCompressInit BZ2_bzCompress BZ2_bzCompressEnd
@@ -177,6 +178,14 @@ foreach(_src IN LISTS BZ2NG_O3_SOURCES)
     set_source_files_properties(${_src} PROPERTIES COMPILE_OPTIONS "${_opts}")
   endif()
 endforeach()
+# gcc's first scheduling pass on AArch64 moves a prefetch in libsais's final
+# induction scans above the test that guards it, since a prefetch cannot trap.
+# It then also runs for marked entries, at addresses gigabytes outside the
+# arrays, and Arm cores stall on each of those for tens of nanoseconds
+# (research/L3-libsais-gcc-aarch64.md).
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND BZ2NG_ARCH STREQUAL "aarch64")
+  set_property(SOURCE lib/sort_libsais.c APPEND PROPERTY COMPILE_OPTIONS -fno-sched-spec)
+endif()
 # libbz2's own code in bzlib.c has an unused parameter (BZ2_bzflush).
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   set_source_files_properties(lib/bzlib.c PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter")
