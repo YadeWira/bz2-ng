@@ -27,8 +27,9 @@
 
 /*
  * Taken from libdeflate 1.26 (common_defs.h). Changes for bz2-ng: it does not
- * include libdeflate.h, and get_unaligned_be64() and put_unaligned_be64() are
- * added.
+ * include libdeflate.h, get_unaligned_be64() and put_unaligned_be64() are
+ * added, and MSVC's prefetchr() casts its address to the const char * that
+ * _mm_prefetch() takes.
  */
 
 #ifndef COMMON_DEFS_H
@@ -236,7 +237,7 @@ typedef size_t machine_word_t;
 #  define prefetchr(addr)	__builtin_prefetch((addr), 0)
 #elif defined(_MSC_VER)
 #  if defined(ARCH_X86_32) || defined(ARCH_X86_64)
-#    define prefetchr(addr)	_mm_prefetch((addr), _MM_HINT_T0)
+#    define prefetchr(addr)	_mm_prefetch((const char *)(addr), _MM_HINT_T0)
 #  elif defined(ARCH_ARM64)
 #    define prefetchr(addr)	__prefetch2((addr), 0x00 /* prfop=PLDL1KEEP */)
 #  elif defined(ARCH_ARM32)

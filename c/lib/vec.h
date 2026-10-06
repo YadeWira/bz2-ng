@@ -2,9 +2,9 @@
  * vec.h - 16-byte vector operations for the kernel tiers
  *
  * 16-byte vector operations for the kernel tiers, implemented once with
- * AArch64 NEON and once with x86 SSE2..AVX2 intrinsics. Included only by the
- * tier translation units (kern_*.c via kern_template.h); which implementation
- * is compiled follows the architecture and the TU's flags, and VEC_ENABLED says
+ * AArch64 NEON and once with x86 SSE2..SSE4.1 intrinsics. Included only by
+ * the tier translation units (kern_*.c via kern_template.h); which
+ * implementation is compiled follows the architecture, and VEC_ENABLED says
  * whether any vector code is compiled at all (the scalar tier defines
  * KERN_NO_VECTORS to turn it off).
  *
@@ -101,7 +101,15 @@ vec_bcast_lane(vec_t v, unsigned k)
 	return vqtbl1q_u8(v, vdupq_n_u8((u8)k));
 }
 
-#elif !defined(KERN_NO_VECTORS) && defined(ARCH_X86_64) && defined(__SSE4_1__)
+#elif !defined(KERN_NO_VECTORS) && defined(ARCH_X86_64)
+/*
+ * A vector tier's translation unit must have SSE4.1 enabled (CMakeLists.txt
+ * gives it -march=x86-64-v2 or -v3). cl has no SSE4.1 macro and compiles
+ * these intrinsics in any file.
+ */
+#  if !defined(__SSE4_1__) && !(defined(_MSC_VER) && !defined(__clang__))
+#    error "an x86 vector tier needs SSE4.1 enabled (-march=x86-64-v2)"
+#  endif
 #  include <immintrin.h>
 #  define VEC_ENABLED  1
 #  define VEC_NEON     0

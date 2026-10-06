@@ -26,7 +26,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #ifdef _WIN32
 #  include <errno.h>
 #  include <fcntl.h>
@@ -36,6 +35,7 @@
 #endif
 
 #include "bzlib.h"
+#include "compat.h"
 #include "kern.h"
 #include "reference_api.h"
 #include "test_tier.h"
@@ -1128,9 +1128,9 @@ suite_wrappers(void)
 				if (shrink)
 					la = lb = (unsigned)(x->n / 3);
 				const size_t offered = la;
-				for (size_t i = 0; i < cap; i++)
-					oa[i] = ob[i] =
-						(char)pattern_byte(i, 0);
+				for (size_t k = 0; k < cap; k++)
+					oa[k] = ob[k] =
+						(char)pattern_byte(k, 0);
 				int ra = ref_BZ2_bzBuffToBuffCompress(
 					oa, &la, (char *)x->data,
 					(unsigned)x->n, level, 0, 0);
@@ -1144,13 +1144,13 @@ suite_wrappers(void)
 				 * when it did not fit) both buffers keep the
 				 * pattern.
 				 */
-				for (size_t i = ra == BZ_OK ? la : offered;
-				     i < cap; i++) {
-					if (oa[i] != (char)pattern_byte(i, 0) ||
-					    ob[i] != (char)pattern_byte(i, 0)) {
+				for (size_t k = ra == BZ_OK ? la : offered;
+				     k < cap; k++) {
+					if (oa[k] != (char)pattern_byte(k, 0) ||
+					    ob[k] != (char)pattern_byte(k, 0)) {
 						fail("buff2buff wrote byte %zu "
 						     "(level %d)",
-						     i, level);
+						     k, level);
 						break;
 					}
 				}

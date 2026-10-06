@@ -37,7 +37,7 @@ endforeach()
 add_library(bz2_rand STATIC ${_rand_srcs})
 target_include_directories(bz2_rand BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/reference)
 target_compile_definitions(bz2_rand PRIVATE BZPFX=rand_ _FILE_OFFSET_BITS=64 _DEFAULT_SOURCE)
-target_compile_options(bz2_rand PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/reference_rename.h -w)
+target_compile_options(bz2_rand PRIVATE ${BZ2NG_RENAME_REFERENCE} ${BZ2NG_NO_WARNINGS})
 
 # bz2-ng with each decoder memory layout as BZ2_bzDecompressInit's default,
 # so that every test that reaches the decoder through the public API runs on
@@ -123,7 +123,12 @@ bzng_tier_test(sort_oracle $<TARGET_FILE:sort_test>)
 # sorter's object.
 bzng_test_program(sort_test_sais_trap sort_test.c sort_libsais_trap.c)
 add_test(NAME sort_oracle_sais_trap COMMAND sort_test_sais_trap)
-set(_sais_args -DNM=${CMAKE_NM} -DSTATIC=$<TARGET_FILE:bz2_static>
+if(MSVC)
+  set(_symbol_tool ${BZ2NG_SYMBOL_TOOL})
+else()
+  set(_symbol_tool -DNM=${CMAKE_NM})
+endif()
+set(_sais_args ${_symbol_tool} -DSTATIC=$<TARGET_FILE:bz2_static>
                "-DOBJ=$<FILTER:$<TARGET_OBJECTS:bz2_core_objects>,INCLUDE,sort_libsais>")
 if(TARGET bz2_shared)
   list(APPEND _sais_args -DSHARED=$<TARGET_FILE:bz2_shared>)
@@ -147,20 +152,38 @@ set_tests_properties(tier_identity PROPERTIES SKIP_REGULAR_EXPRESSION "fewer tha
 
 # Exactly the public functions are exported from the shared library.
 if(TARGET bz2_shared)
+  if(MSVC)
+    set(_export_tool ${BZ2NG_SYMBOL_TOOL})
+  else()
+    set(_export_tool -DOBJDUMP=${CMAKE_OBJDUMP})
+  endif()
   add_test(NAME abi_exported_symbols
            COMMAND ${CMAKE_COMMAND} -DLIB=$<TARGET_FILE:bz2_shared> "-DEXPECTED=${BZ2NG_EXPORTED}"
-                   -DOBJDUMP=${CMAKE_OBJDUMP} -P ${CMAKE_CURRENT_SOURCE_DIR}/exported_symbols.cmake)
+                   ${_export_tool} -P ${CMAKE_CURRENT_SOURCE_DIR}/exported_symbols.cmake)
 endif()
 
 # bzip2's `make test`, and bzip2.c against stock libbz2 versus against bz2-ng.
-if(TARGET bzip2)
+# These are shell scripts, which a Windows host runs with a POSIX sh (Git for
+# Windows has one) and the tools beside it (cmp, sed, head).
+set(_sh "")
+if(CMAKE_HOST_WIN32)
+  file(TO_CMAKE_PATH "$ENV{ProgramFiles}" _program_files)
+  find_program(BZ2NG_SH sh HINTS "${_program_files}/Git/usr/bin")
+  if(BZ2NG_SH)
+    set(_sh ${BZ2NG_SH})
+    get_filename_component(_sh_dir ${BZ2NG_SH} DIRECTORY)
+  else()
+    message(WARNING "no POSIX sh found: bzip2_make_test and bzip2_cli_compare are not run")
+  endif()
+endif()
+if(TARGET bzip2 AND (_sh OR NOT CMAKE_HOST_WIN32))
   add_test(NAME bzip2_make_test
-           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/make_test.sh $<TARGET_FILE:bzip2> ${CMAKE_CURRENT_BINARY_DIR}/make_test)
+           COMMAND ${_sh} ${CMAKE_CURRENT_SOURCE_DIR}/make_test.sh $<TARGET_FILE:bzip2> ${CMAKE_CURRENT_BINARY_DIR}/make_test)
   list(TRANSFORM BZ2NG_REFERENCE_SOURCES PREPEND ${PROJECT_SOURCE_DIR}/ OUTPUT_VARIABLE _ref_srcs)
   add_library(bz2_reference_plain STATIC ${_ref_srcs})
   target_include_directories(bz2_reference_plain BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/reference)
   target_compile_definitions(bz2_reference_plain PRIVATE _FILE_OFFSET_BITS=64 _DEFAULT_SOURCE)
-  target_compile_options(bz2_reference_plain PRIVATE -w)
+  target_compile_options(bz2_reference_plain PRIVATE ${BZ2NG_NO_WARNINGS})
   add_executable(bzip2_reference ${PROJECT_SOURCE_DIR}/programs/bzip2.c)
   target_include_directories(bzip2_reference BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/reference)
   target_compile_definitions(bzip2_reference PRIVATE _FILE_OFFSET_BITS=64 _DEFAULT_SOURCE)
@@ -171,6 +194,10 @@ if(TARGET bzip2)
   target_link_libraries(bzip2_reference PRIVATE bz2_reference_plain)
   bzng_test_program(cli_tool cli_tool.c)
   add_test(NAME bzip2_cli_compare
-           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/cli_compare.sh $<TARGET_FILE:bzip2_reference> $<TARGET_FILE:bzip2>
+           COMMAND ${_sh} ${CMAKE_CURRENT_SOURCE_DIR}/cli_compare.sh $<TARGET_FILE:bzip2_reference> $<TARGET_FILE:bzip2>
                    $<TARGET_FILE:cli_tool> ${CMAKE_CURRENT_BINARY_DIR}/cli_compare)
+  if(_sh)
+    set_tests_properties(bzip2_make_test bzip2_cli_compare
+                         PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sh_dir}")
+  endif()
 endif()

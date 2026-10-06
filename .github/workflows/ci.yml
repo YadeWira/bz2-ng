@@ -19,7 +19,7 @@ on:
         description: The group of jobs to run
         type: choice
         default: all
-        options: [all, build-and-test, portability, windows, fuzz]
+        options: [all, build-and-test, portability, windows, msvc, fuzz]
   push:
     branches: [main]
     paths:
@@ -174,6 +174,53 @@ jobs:
           wineserver -p < /dev/null > /dev/null 2>&1
           wineboot -u < /dev/null > /dev/null 2>&1
           ctest --test-dir c/build -j "$(nproc)" --output-on-failure --timeout 2400 -E 'mutate|(valid|crafted|capacity)_(scalar|sse4)'
+
+  # Windows x86-64 with MSVC: the runner image's Visual Studio (2026 on
+  # windows-2025 today; CMake picks the newest it finds), Release, built with
+  # the Visual Studio generator and tested on Windows itself. What the
+  # mingw job cannot see: cl's C11 and its /W4 warnings; the x86 tiers as cl
+  # compiles them (the SSE4 tier from intrinsics alone, the AVX2 tier under
+  # /arch:AVX2); the DLL that Microsoft's linker makes from the
+  # module-definition file, read with dumpbin; Microsoft's own C runtime (the
+  # UCRT) under the tests and bzip2; and Windows rather than Wine. The
+  # shell-script tests run under Git for Windows' sh. Line endings stay as
+  # committed, since the tests compare files byte for byte. A compiler or
+  # linker warning fails the job, in a step after the tests so that they
+  # still run.
+  msvc:
+    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'msvc'
+    name: Windows x86-64 / MSVC
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - name: Configure
+        run: cmake -S c -B c/build -A x64
+      - name: Build
+        run: cmake --build c/build --config Release --parallel "$NUMBER_OF_PROCESSORS" 2>&1 | tee build.log
+      - name: Test
+        run: ctest --test-dir c/build -C Release -j "$NUMBER_OF_PROCESSORS" --output-on-failure --timeout 2400 -E mutate
+      # The tiers this runner has, their common digest, and the DLL's exports.
+      - name: Tiers and exports
+        run: ctest --test-dir c/build -C Release -V -R '^(tier_identity|abi_exported_symbols)$'
+      # BZ_NO_STDIO under cl: the library must reach no stdio symbol, which
+      # the symbol test reads with dumpbin.
+      - name: BZ_NO_STDIO build and its symbol test
+        run: |
+          cmake -S c -B c/build-nostdio -A x64 -DBZ2NG_NO_STDIO=ON
+          cmake --build c/build-nostdio --config Release --parallel "$NUMBER_OF_PROCESSORS" 2>&1 | tee -a build.log
+          ctest --test-dir c/build-nostdio -C Release -V
+      - name: No compiler or linker warnings
+        if: ${{ !cancelled() }}
+        run: |
+          if grep -E 'warning [A-Z]+[0-9]+' build.log; then
+            exit 1
+          fi
 
   # The fuzz targets (c/fuzz/), built and run from their generated seeds for
   # 90 s each, 30 s per kernel tier of the runner. Long campaigns run on the

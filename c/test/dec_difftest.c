@@ -47,9 +47,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "bzlib.h"
+#include "compat.h"
 #include "kern.h"
 #include "reference_api.h"
 #include "test_tier.h"
@@ -210,14 +210,14 @@ ensure_out(size_t cap)
 }
 
 /*
- * Fills a[0..n) and b[0..n) with the same pseudo-random bytes from seed, so
- * that any byte a decoder writes but libbz2 does not (or the reverse) shows
- * up when the buffers are compared.
+ * Fills a[0..n) and b[0..n) with the same pseudo-random bytes from
+ * pattern_seed, so that any byte a decoder writes but libbz2 does not (or the
+ * reverse) shows up when the buffers are compared.
  */
 static void
-fill_pattern(uint8_t *a, uint8_t *b, size_t n, uint64_t seed)
+fill_pattern(uint8_t *a, uint8_t *b, size_t n, uint64_t pattern_seed)
 {
-	uint64_t x = seed * 0x9E3779B97F4A7C15ull | 1;
+	uint64_t x = pattern_seed * 0x9E3779B97F4A7C15ull | 1;
 	size_t i = 0;
 
 	for (; i + 8 <= n; i += 8) {
@@ -2156,7 +2156,12 @@ main(int argc, char **argv)
 	gen_inputs();
 	for (; i < argc; i++)
 		load_file(argv[i], chunk, file_level);
-	setvbuf(stdout, NULL, _IOLBF, 0);
+	/*
+	 * Unbuffered, so that every line is out before anything after it can
+	 * crash (Microsoft's C runtime has no line buffering: _IOLBF is
+	 * _IOFBF there).
+	 */
+	setvbuf(stdout, NULL, _IONBF, 0);
 	printf("tier %s: %zu streams (generated + files)\n", bzng_tier_name(),
 	       n_streams);
 	if (do_valid)

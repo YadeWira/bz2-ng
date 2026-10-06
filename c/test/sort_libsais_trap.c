@@ -24,4 +24,12 @@ trap_malloc(size_t size)
 }
 
 #define BZNG_SAIS_MALLOC trap_malloc
+/* With an allocator that never returns, libsais's code after it is dead. */
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable : 4702) /* unreachable code */
+#endif
 #include "sort_libsais.c"
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif

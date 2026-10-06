@@ -15,12 +15,17 @@ REF=$(cd "$(dirname "$0")/reference" && pwd)
 rm -rf "$W"
 mkdir -p "$W"
 cd "$W" || exit 2
-# Both programs run as "bzip2", which they print in their messages.
+# Both programs run as "bzip2", which they print in their messages; a Windows
+# executable keeps its extension.
+case $S in
+*.exe) x=.exe ;;
+*) x= ;;
+esac
 mkdir -p stock ng
-cp "$S" stock/bzip2
-cp "$N" ng/bzip2
-S=$W/stock/bzip2
-N=$W/ng/bzip2
+cp "$S" stock/bzip2$x
+cp "$N" ng/bzip2$x
+S=$W/stock/bzip2$x
+N=$W/ng/bzip2$x
 cp "$REF"/sample*.bz2 "$REF"/sample*.ref .
 # Generated inputs; the comparison is meaningless without them.
 gen() { # output file, then the cli_tool arguments; stdin passed through

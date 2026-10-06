@@ -17,8 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
+#include "compat.h"
 #include "enc.h"
 #include "sort.h"
 #include "sort_oracle.h"
@@ -247,9 +247,7 @@ thue_morse(void)
 		if (quick && n > 100000)
 			continue;
 		for (int32_t i = 0; i < n; i++)
-			buf[i] = (uint8_t)('a' +
-					   (__builtin_popcount((unsigned)i) &
-					    1));
+			buf[i] = (uint8_t)('a' + (popcount32((u32)i) & 1));
 		check_block("thue_morse", buf, n);
 	}
 	family_end("thue_morse");

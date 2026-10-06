@@ -39,8 +39,22 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   set(BZ2NG_WARNINGS -Wall -Wextra)
+elseif(MSVC)
+  # C4324 reports the padding that an _Alignas asks for.
+  set(BZ2NG_WARNINGS /W4 /wd4324)
+endif()
+# cl: C11 (_Alignas, _Static_assert), which CMake asks for itself only from
+# 3.21; the POSIX names libbz2's code uses (setmode, fileno, O_BINARY), which
+# Microsoft's C runtime hides wherever __STDC__ is defined; and none of its
+# deprecation warnings for standard C and POSIX names.
+if(MSVC)
+  add_compile_options(/std:c11)
+  add_compile_definitions(_CRT_DECLARE_NONSTDC_NAMES=1 _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
 endif()
 if(BZ2NG_SANITIZE)
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR "BZ2NG_SANITIZE needs gcc or clang")
+  endif()
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
   add_link_options(-fsanitize=address,undefined)
 endif()
@@ -115,9 +129,13 @@ set(BZ2NG_SOURCES
   lib/x86/kern_avx2.c    # ISA: x86-64-v3 tier
 )
 
-# Per-file ISA flags (GCC/Clang spelling).
+# Per-file ISA flags.
 function(bzng_isa_flags)
-  if(BZ2NG_ARCH STREQUAL "x86_64")
+  if(BZ2NG_ARCH STREQUAL "x86_64" AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    # cl compiles any intrinsic in any file (lib/vec.h). /arch:AVX2 defines
+    # __AVX2__ for the AVX2 tier and VEX-encodes all of a file's vector code.
+    set_source_files_properties(lib/x86/kern_avx2.c lib/x86/crc32_vpclmul.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+  elseif(BZ2NG_ARCH STREQUAL "x86_64")
     set_source_files_properties(lib/x86/kern_sse4.c PROPERTIES COMPILE_OPTIONS "-march=x86-64-v2")
     set_source_files_properties(lib/x86/kern_avx2.c PROPERTIES COMPILE_OPTIONS "-march=x86-64-v3")
     set_source_files_properties(lib/x86/crc32_pclmul.c PROPERTIES COMPILE_OPTIONS "-msse4.1;-mpclmul")
@@ -186,9 +204,12 @@ endforeach()
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND BZ2NG_ARCH STREQUAL "aarch64")
   set_property(SOURCE lib/sort_libsais.c APPEND PROPERTY COMPILE_OPTIONS -fno-sched-spec)
 endif()
-# libbz2's own code in bzlib.c has an unused parameter (BZ2_bzflush).
+# libbz2's own code in bzlib.c has an unused parameter (BZ2_bzflush), and
+# for cl also stores fread's and fwrite's size_t results in its Int32s.
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   set_source_files_properties(lib/bzlib.c PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter")
+elseif(MSVC)
+  set_source_files_properties(lib/bzlib.c PROPERTIES COMPILE_OPTIONS "/wd4100;/wd4267")
 endif()
 
 # decompress.c is compiled on its own so the tests can build libraries with
@@ -202,7 +223,14 @@ bzng_library_settings(bz2_dec_objects)
 target_compile_definitions(bz2_dec_objects PRIVATE BZNG_DEFAULT_LAYOUT=${BZ2NG_DEFAULT_LAYOUT})
 
 add_library(bz2_static STATIC $<TARGET_OBJECTS:bz2_core_objects> $<TARGET_OBJECTS:bz2_dec_objects>)
-set_target_properties(bz2_static PROPERTIES OUTPUT_NAME bz2)
+# Where a DLL's import library is bz2.lib too (MSVC's toolchain, unlike
+# mingw's libbz2.dll.a), the static library is bz2_static.lib, as in libbz2's
+# own CMake build.
+if(WIN32 AND NOT MINGW)
+  set_target_properties(bz2_static PROPERTIES OUTPUT_NAME bz2_static)
+else()
+  set_target_properties(bz2_static PROPERTIES OUTPUT_NAME bz2)
+endif()
 target_include_directories(bz2_static PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(BZ2NG_NO_STDIO)
   target_compile_definitions(bz2_static PUBLIC BZ_NO_STDIO)
@@ -280,8 +308,15 @@ endif()
 # ---- stock libbz2 1.0.8 for the tests and the benchmark ---------------------------
 # test/reference holds its unmodified sources; built with every global symbol
 # renamed ref_* (test/reference_rename.h) so that it links next to bz2-ng, at
-# libbz2's own -O2.
+# libbz2's own -O2, and without warnings.
 if((BZ2NG_BUILD_TESTS OR BZ2NG_BUILD_BENCH) AND NOT BZ2NG_NO_STDIO)
+  if(MSVC)
+    set(BZ2NG_RENAME_REFERENCE /FI${CMAKE_CURRENT_SOURCE_DIR}/test/reference_rename.h)
+    set(BZ2NG_NO_WARNINGS /W0)
+  else()
+    set(BZ2NG_RENAME_REFERENCE -include ${CMAKE_CURRENT_SOURCE_DIR}/test/reference_rename.h)
+    set(BZ2NG_NO_WARNINGS -w)
+  endif()
   set(BZ2NG_REFERENCE_SOURCES blocksort bzlib compress crctable decompress huffman randtable)
   list(TRANSFORM BZ2NG_REFERENCE_SOURCES PREPEND test/reference/)
   list(TRANSFORM BZ2NG_REFERENCE_SOURCES APPEND .c)
@@ -289,10 +324,17 @@ if((BZ2NG_BUILD_TESTS OR BZ2NG_BUILD_BENCH) AND NOT BZ2NG_NO_STDIO)
   target_include_directories(bz2_reference BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/reference
                              INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/test)
   target_compile_definitions(bz2_reference PRIVATE BZPFX=ref_ _FILE_OFFSET_BITS=64 _DEFAULT_SOURCE)
-  target_compile_options(bz2_reference PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/test/reference_rename.h -w
+  target_compile_options(bz2_reference PRIVATE ${BZ2NG_RENAME_REFERENCE} ${BZ2NG_NO_WARNINGS}
                          $<$<CONFIG:Release,RelWithDebInfo>:-O2>)
 endif()
 
+# MSVC's toolchain has no nm or objdump; the symbol tests read objects,
+# libraries and the DLL with its dumpbin.
+if(BZ2NG_BUILD_TESTS AND MSVC)
+  get_filename_component(_msvc_bin ${CMAKE_C_COMPILER} DIRECTORY)
+  find_program(BZ2NG_DUMPBIN dumpbin HINTS ${_msvc_bin})
+  set(BZ2NG_SYMBOL_TOOL -DDUMPBIN=${BZ2NG_DUMPBIN})
+endif()
 if(BZ2NG_BUILD_TESTS AND NOT BZ2NG_NO_STDIO)
   enable_testing()
   add_subdirectory(test)
@@ -304,7 +346,8 @@ elseif(BZ2NG_BUILD_TESTS)
   target_link_libraries(no_stdio_test PRIVATE bz2_static)
   add_test(NAME no_stdio_round_trip COMMAND no_stdio_test)
   add_test(NAME no_stdio_symbols
-           COMMAND ${CMAKE_COMMAND} -DLIB=$<TARGET_FILE:bz2_static> -P ${CMAKE_CURRENT_SOURCE_DIR}/test/no_stdio_symbols.cmake)
+           COMMAND ${CMAKE_COMMAND} -DLIB=$<TARGET_FILE:bz2_static> ${BZ2NG_SYMBOL_TOOL}
+                   -P ${CMAKE_CURRENT_SOURCE_DIR}/test/no_stdio_symbols.cmake)
 endif()
 if(BZ2NG_BUILD_FUZZ)
   # The seed generator reuses the tests' reference and randomising builds.

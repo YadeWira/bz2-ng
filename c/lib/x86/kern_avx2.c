@@ -7,14 +7,18 @@
 /*
  * x86-64-v3 (AVX2, BMI1, BMI2, FMA, LZCNT, MOVBE); the tier's CRC kernel is
  * x86/crc32_vpclmul.c on CPUs with VPCLMULQDQ, else x86/crc32_pclmul.c.
- * Compiled with -march=x86-64-v3 on x86-64, and selected only on CPUs with
- * those features.  Compiles to nothing elsewhere, x32 included
- * (BZNG_X86_TIERS).
+ * Compiled with -march=x86-64-v3 (cl: /arch:AVX2) on x86-64, and selected
+ * only on CPUs with those features.  Compiles to nothing elsewhere, x32
+ * included (BZNG_X86_TIERS).
  */
 
 #include "../lib_common.h"
 
 #if BZNG_X86_TIERS
+/* Without AVX2 the template compiles the SSE4 tier's code under this name. */
+#  ifndef __AVX2__
+#    error "the AVX2 tier needs AVX2 enabled (-march=x86-64-v3, /arch:AVX2)"
+#  endif
 #  define SUFFIX _avx2
 #  include "../kern_template.h"
 #else

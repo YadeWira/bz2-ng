@@ -4,8 +4,8 @@
  * CRC-32/BZIP2 by carry-less multiplication with VPCLMULQDQ on 256-bit
  * vectors (x86-64; method as in crc32_pclmul.c, four 256-bit accumulators
  * folded by 1024 bits per step). Compiled with -mavx2 -mvpclmulqdq -mpclmul
- * for this file only; the dispatch calls it only on CPUs with AVX2 and
- * VPCLMULQDQ. Elsewhere this file compiles to nothing.
+ * (cl: /arch:AVX2) for this file only; the dispatch calls it only on CPUs with
+ * AVX2 and VPCLMULQDQ. Elsewhere this file compiles to nothing.
  *
  * Part of bz2-ng; MIT licence (see LICENSE).
  */

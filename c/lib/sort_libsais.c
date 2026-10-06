@@ -114,10 +114,15 @@ bzng_sais_free(void *ptr)
 #if defined(__GNUC__) || defined(__clang__)
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic ignored "-Wunused-function"
+#elif defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 4505) /* unreferenced static function */
 #endif
 #include "../third_party/libsais/libsais.c"
 #if defined(__GNUC__) || defined(__clang__)
 #  pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#  pragma warning(pop)
 #endif
 
 #undef malloc

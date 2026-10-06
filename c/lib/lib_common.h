@@ -27,6 +27,14 @@
 #else
 #  define BZNG_X86_TIERS 0
 #endif
+/*
+ * The preprocessor's reading of UINTPTR_MAX (here and in dec.h) must agree
+ * with the pointer size: MSVC's has an i64 suffix.
+ */
+#ifdef ARCH_X86_64
+_Static_assert(BZNG_X86_TIERS == (sizeof(void *) == 8),
+	       "UINTPTR_MAX misread by the preprocessor");
+#endif
 
 /*
  * libbz2's defaults and checks, shared by both drivers (utils.c):

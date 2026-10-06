@@ -29,11 +29,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 #ifdef _WIN32
 #  include <windows.h>
 #endif
 
+#include "compat.h"
 #include "dec.h"
 #include "kern.h"
 #include "reference_api.h"

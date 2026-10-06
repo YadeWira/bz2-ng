@@ -2,8 +2,9 @@
  * x86/crc32_pclmul.c - CRC-32/BZIP2 with PCLMULQDQ
  *
  * CRC-32/BZIP2 by carry-less multiplication with PCLMULQDQ (x86-64).
- * Compiled with -msse4.1 -mpclmul for this file only; the dispatch calls it
- * only on CPUs with both. Elsewhere this file compiles to nothing.
+ * Compiled with -msse4.1 -mpclmul for this file only (cl needs no flag for
+ * the intrinsics); the dispatch calls it only on CPUs with both. Elsewhere
+ * this file compiles to nothing.
  *
  * bzip2's CRC is MSB-first, so no bit reflection is needed: each 16-byte
  * block is byte-reversed, after which bit i of the 128-bit lane is the

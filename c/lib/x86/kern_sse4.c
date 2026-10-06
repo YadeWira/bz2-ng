@@ -6,9 +6,9 @@
 
 /*
  * x86-64-v2 (SSE4.2, SSSE3, POPCNT); the tier's CRC kernel is
- * x86/crc32_pclmul.c.  Compiled with -march=x86-64-v2 on x86-64, and selected
- * only on CPUs with those features.  Compiles to nothing elsewhere, x32
- * included (BZNG_X86_TIERS).
+ * x86/crc32_pclmul.c.  Compiled with -march=x86-64-v2 on x86-64 (cl needs no
+ * flag for the intrinsics), and selected only on CPUs with those features.
+ * Compiles to nothing elsewhere, x32 included (BZNG_X86_TIERS).
  */
 
 #include "../lib_common.h"
