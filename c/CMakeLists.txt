@@ -8,13 +8,14 @@
 # instruction-set flags, and only on their own architecture (bzng_isa_flags
 # below); the run-time dispatch (lib/kern.h, lib/crc32.c) calls them only on
 # CPUs that have the instructions. Nothing is generated at configure time
-# except bzip2.pc and the shared library's list of exported symbols (and, for
-# the tests, the randomising compressor of test/CMakeLists.txt).
+# except bzip2.pc, the shared library's list of exported symbols and the
+# symbolic links that the install adds (and, for the tests, the randomising
+# compressor of test/CMakeLists.txt).
 cmake_minimum_required(VERSION 3.16)
 project(bz2ng VERSION 0.1.0 LANGUAGES C)
 
 option(BZ2NG_BUILD_SHARED "Build the shared library" ON)
-set(BZ2NG_SONAME "1.0" CACHE STRING "Shared-library SONAME version: 1.0 (upstream, Debian) or 1 (Fedora, openSUSE)")
+set(BZ2NG_SONAME "1.0" CACHE STRING "ELF shared-library SONAME version: 1.0 (upstream, Debian, Ubuntu) or 1 (Fedora, openSUSE)")
 set_property(CACHE BZ2NG_SONAME PROPERTY STRINGS "1.0" "1")
 option(BZ2NG_NO_STDIO "Build without the FILE* layer (BZ_NO_STDIO); static library only" OFF)
 option(BZ2NG_SANITIZE "Build everything with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -31,6 +32,8 @@ option(BZ2NG_DECODER_IN_FORMULA
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
+
+include(GNUInstallDirs)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -151,7 +154,7 @@ bzng_isa_flags()
 # Optimisation: the encoder and sorter at -O3, everything else at -O2
 # (measured: the encoder is faster at -O3, the decoder and the kernel tiers
 # gain nothing from it; libsais is built as it was timed, and at -O2 it was
-# no different where that was tried, research/L3-libsais-gcc-aarch64.md).
+# no different where that was tried).
 # Appended after the build type's flags, so they win.
 set(BZ2NG_O3_SOURCES lib/compress.c lib/enc_block.c lib/enc_huff.c lib/enc_sort.c lib/sort_libsais.c)
 
@@ -185,7 +188,7 @@ function(bzng_library_settings target)
   endif()
   target_compile_options(${target} PRIVATE ${BZ2NG_WARNINGS})
   if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(${target} PRIVATE -fvisibility=hidden $<$<CONFIG:Release,RelWithDebInfo>:-O2>)
+    target_compile_options(${target} PRIVATE -fvisibility=hidden $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-O2>)
   endif()
 endfunction()
 foreach(_src IN LISTS BZ2NG_O3_SOURCES)
@@ -194,15 +197,15 @@ foreach(_src IN LISTS BZ2NG_O3_SOURCES)
     if(NOT _opts)
       set(_opts "")
     endif()
-    list(APPEND _opts "$<$<CONFIG:Release,RelWithDebInfo>:-O3>")
+    list(APPEND _opts "$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-O3>")
     set_source_files_properties(${_src} PROPERTIES COMPILE_OPTIONS "${_opts}")
   endif()
 endforeach()
 # gcc's first scheduling pass on AArch64 moves a prefetch in libsais's final
 # induction scans above the test that guards it, since a prefetch cannot trap.
 # It then also runs for marked entries, at addresses gigabytes outside the
-# arrays, and Arm cores stall on each of those for tens of nanoseconds
-# (research/L3-libsais-gcc-aarch64.md).
+# arrays, and Arm cores stall on each of those for tens of nanoseconds,
+# costing a third of the sorter's speed.
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND BZ2NG_ARCH STREQUAL "aarch64")
   set_property(SOURCE lib/sort_libsais.c APPEND PROPERTY COMPILE_OPTIONS -fno-sched-spec)
 endif()
@@ -225,14 +228,7 @@ bzng_library_settings(bz2_dec_objects)
 target_compile_definitions(bz2_dec_objects PRIVATE BZNG_DEFAULT_LAYOUT=${BZ2NG_DEFAULT_LAYOUT})
 
 add_library(bz2_static STATIC $<TARGET_OBJECTS:bz2_core_objects> $<TARGET_OBJECTS:bz2_dec_objects>)
-# Where a DLL's import library is bz2.lib too (MSVC's toolchain, unlike
-# mingw's libbz2.dll.a), the static library is bz2_static.lib, as in libbz2's
-# own CMake build.
-if(WIN32 AND NOT MINGW)
-  set_target_properties(bz2_static PROPERTIES OUTPUT_NAME bz2_static)
-else()
-  set_target_properties(bz2_static PROPERTIES OUTPUT_NAME bz2)
-endif()
+set_target_properties(bz2_static PROPERTIES OUTPUT_NAME bz2)
 target_include_directories(bz2_static PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(BZ2NG_NO_STDIO)
   target_compile_definitions(bz2_static PUBLIC BZ_NO_STDIO)
@@ -276,8 +272,48 @@ if(BZ2NG_BUILD_SHARED AND NOT BZ2NG_NO_STDIO)
   endif()
 endif()
 
+# ---- library names ------------------------------------------------------------------
+# Each is the name of the file it replaces in the platform's own bzip2
+# package, read from the packages themselves.  On ELF
+# targets: libbz2.a, and libbz2.so.1.0.8 with the SONAME BZ2NG_SONAME selects
+# and the links the install rules add.  The file is named as by upstream's
+# Makefile-libbz2_so and Fedora; Debian and Ubuntu call theirs
+# libbz2.so.1.0.4, a name nothing loads it by.
+if(APPLE AND TARGET bz2_shared)
+  # macOS's own /usr/lib/libbz2.1.0.dylib, compatibility version 1.0.0 and
+  # current version 1.0.8, which is what programs built for macOS record;
+  # Homebrew's formula ships no dylib there.  The install name is absolute,
+  # like the system's, so that the installed bzip2 finds the library without
+  # an rpath.
+  if(NOT BZ2NG_SONAME STREQUAL "1.0")
+    message(FATAL_ERROR "BZ2NG_SONAME applies to ELF targets; on macOS the library is libbz2.1.0.dylib")
+  endif()
+  set_target_properties(bz2_shared PROPERTIES INSTALL_NAME_DIR ${CMAKE_INSTALL_FULL_LIBDIR})
+elseif(MINGW AND TARGET bz2_shared)
+  # msys2's libbz2-1.dll, which its programs load by that name; the import
+  # library keeps CMake's libbz2.dll.a, as msys2's does.
+  set_target_properties(bz2_shared PROPERTIES RUNTIME_OUTPUT_NAME bz2-1)
+elseif(WIN32 AND NOT MINGW)
+  # vcpkg's bz2.dll with the import library bz2.lib, or bz2.lib alone where
+  # it builds no DLL, and bz2d for debug builds.  Beside a DLL the static
+  # library cannot be bz2.lib, so it is bz2_static.lib, as in libbz2's own
+  # CMake build.
+  set_target_properties(bz2_static PROPERTIES DEBUG_POSTFIX d)
+  if(TARGET bz2_shared)
+    set_target_properties(bz2_shared PROPERTIES DEBUG_POSTFIX d)
+    set_target_properties(bz2_static PROPERTIES OUTPUT_NAME bz2_static)
+  endif()
+endif()
+
 # ---- pkg-config and install ---------------------------------------------------------
-include(GNUInstallDirs)
+# Links the install adds, made in the build tree so that DESTDIR and --prefix
+# apply to them as to every other file: name, pointing at target, is
+# installed into destination.
+function(bzng_install_link target name destination)
+  file(MAKE_DIRECTORY ${PROJECT_BINARY_DIR}/install-links)
+  file(CREATE_LINK ${target} ${PROJECT_BINARY_DIR}/install-links/${name} SYMBOLIC)
+  install(FILES ${PROJECT_BINARY_DIR}/install-links/${name} DESTINATION ${destination})
+endfunction()
 if(BZ2NG_NO_STDIO)
   set(BZ2NG_PC_CFLAGS " -DBZ_NO_STDIO")
 else()
@@ -288,7 +324,13 @@ install(FILES bzlib.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/bzip2.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 install(TARGETS bz2_static ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 if(TARGET bz2_shared)
-  install(TARGETS bz2_shared LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  install(TARGETS bz2_shared RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+          ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  # Debian and Ubuntu add libbz2.so.1 beside their SONAME libbz2.so.1.0, so
+  # that programs linked where the SONAME is libbz2.so.1 run too.
+  if(UNIX AND NOT APPLE AND BZ2NG_SONAME STREQUAL "1.0")
+    bzng_install_link(libbz2.so.1.0.8 libbz2.so.1 ${CMAKE_INSTALL_LIBDIR})
+  endif()
 endif()
 
 # ---- programs (libbz2 1.0.8's, unmodified) -------------------------------------------
@@ -296,7 +338,6 @@ if(BZ2NG_BUILD_PROGRAMS AND NOT BZ2NG_NO_STDIO)
   foreach(_prog bzip2 bzip2recover)
     add_executable(${_prog} programs/${_prog}.c)
     target_compile_definitions(${_prog} PRIVATE _FILE_OFFSET_BITS=64 _DEFAULT_SOURCE)
-    target_link_libraries(${_prog} PRIVATE bz2_static)
     # libbz2's unmodified programs: quiet the warnings modern compilers give
     # for their code (an ignored fchown result, "%Lu" for a 64-bit value,
     # sprintf, which macOS's SDK marks deprecated).
@@ -305,6 +346,34 @@ if(BZ2NG_BUILD_PROGRAMS AND NOT BZ2NG_NO_STDIO)
     endif()
     install(TARGETS ${_prog} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
   endforeach()
+  # bzip2 loads the shared library where there is one, as the bzip2 of
+  # Debian, Fedora, msys2 and macOS does.  bzip2recover calls no library
+  # function, and libbz2's Makefile links it with nothing.
+  if(TARGET bz2_shared)
+    target_link_libraries(bzip2 PRIVATE bz2_shared)
+  else()
+    target_link_libraries(bzip2 PRIVATE bz2_static)
+  endif()
+  # bunzip2 and bzcat are bzip2, which reads the name it was started by:
+  # links on Unix (Debian, Fedora), copies with mingw (msys2), and neither
+  # with MSVC (vcpkg ships bzip2 and bzip2recover alone).  libbz2 1.0.8's
+  # manual page, with the other three programs' pages as links to it on Unix
+  # (Debian, Fedora, macOS); msys2 ships the page alone, vcpkg none.
+  if(NOT WIN32)
+    foreach(_alias bunzip2 bzcat)
+      bzng_install_link(bzip2 ${_alias} ${CMAKE_INSTALL_BINDIR})
+    endforeach()
+    foreach(_page bunzip2 bzcat bzip2recover)
+      bzng_install_link(bzip2.1 ${_page}.1 ${CMAKE_INSTALL_MANDIR}/man1)
+    endforeach()
+  elseif(MINGW)
+    foreach(_alias bunzip2 bzcat)
+      install(PROGRAMS $<TARGET_FILE:bzip2> DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME ${_alias}.exe)
+    endforeach()
+  endif()
+  if(NOT WIN32 OR MINGW)
+    install(FILES programs/bzip2.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
+  endif()
 endif()
 
 # ---- stock libbz2 1.0.8 for the tests and the benchmark ---------------------------
@@ -327,7 +396,7 @@ if((BZ2NG_BUILD_TESTS OR BZ2NG_BUILD_BENCH) AND NOT BZ2NG_NO_STDIO)
                              INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/test)
   target_compile_definitions(bz2_reference PRIVATE BZPFX=ref_ _FILE_OFFSET_BITS=64 _DEFAULT_SOURCE)
   target_compile_options(bz2_reference PRIVATE ${BZ2NG_RENAME_REFERENCE} ${BZ2NG_NO_WARNINGS}
-                         $<$<CONFIG:Release,RelWithDebInfo>:-O2>)
+                         $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-O2>)
 endif()
 
 # MSVC's toolchain has no nm or objdump; the symbol tests read objects,

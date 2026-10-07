@@ -25,6 +25,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 
 /* This program records bit locations in the file to be recovered.
    That means that if 64-bit ints are not supported, we will not
@@ -37,7 +43,7 @@
 */
 #ifdef __GNUC__
    typedef  unsigned long long int  MaybeUInt64;
-#  define MaybeUInt64_FMT "%Lu"
+#  define MaybeUInt64_FMT "%llu"
 #else
 #ifdef _MSC_VER
    typedef  unsigned __int64  MaybeUInt64;
@@ -202,7 +208,9 @@ static Int32 bsGetBit ( BitStream* bs )
       bs->buffLive --;
       return ( ((bs->buffer) >> (bs->buffLive)) & 0x1 );
    } else {
-      Int32 retVal = getc ( bs->handle );
+      Int32 retVal;
+      errno = 0;
+      retVal = getc ( bs->handle );
       if ( retVal == EOF ) {
          if (errno != 0) readError();
          return 2;
@@ -270,6 +278,30 @@ static Bool endsInBz2 ( Char* name )
 }
 
 
+/*---------------------------------------------*/
+/* Create an output block file safely.  The block file names are
+   predictable and are written into the directory of the (possibly
+   untrusted) input file, so a plain fopen() would follow a
+   pre-planted symlink and overwrite an arbitrary file, or silently
+   clobber an existing one.  Mirror fopen_output_safely() in bzip2.c:
+   create with O_EXCL and restrictive permissions so we never follow a
+   symlink and never overwrite an existing file. */
+static FILE* fopenOutputSafely ( Char* name )
+{
+#ifdef _WIN32
+   return fopen ( name, "wb" );
+#else
+   FILE* fp;
+   Int32 fh;
+   fh = open ( name, O_WRONLY|O_CREAT|O_EXCL, S_IWUSR|S_IRUSR );
+   if (fh == -1) return NULL;
+   fp = fdopen ( fh, "wb" );
+   if (fp == NULL) close ( fh );
+   return fp;
+#endif
+}
+
+
 /*---------------------------------------------------*/
 /*---                                             ---*/
 /*---------------------------------------------------*/
@@ -309,7 +341,10 @@ Int32 main ( Int32 argc, Char** argv )
    UInt32      buffHi, buffLo, blockCRC;
    Char*       p;
 
-   strncpy ( progName, argv[0], BZ_MAX_FILENAME-1);
+   if (argc >= 1 && argv[0] != NULL)
+      strncpy ( progName, argv[0], BZ_MAX_FILENAME-1);
+   else
+      strncpy ( progName, "bzip2recover", BZ_MAX_FILENAME-1);
    progName[BZ_MAX_FILENAME-1]='\0';
    inFileName[0] = outFileName[0] = 0;
 
@@ -394,6 +429,7 @@ Int32 main ( Int32 argc, Char** argv )
             bEnd[currBlock] = 0;
          }
          if (currBlock > 0 &&
+	     bEnd[currBlock] >= bStart[currBlock] &&
 	     (bEnd[currBlock] - bStart[currBlock]) >= 130) {
             fprintf ( stderr, "   block %d runs from " MaybeUInt64_FMT 
                               " to " MaybeUInt64_FMT "\n",
@@ -402,7 +438,7 @@ Int32 main ( Int32 argc, Char** argv )
             rbEnd[rbCtr] = bEnd[currBlock];
             rbCtr++;
          }
-         if (currBlock >= BZ_MAX_HANDLED_BLOCKS)
+         if (currBlock >= BZ_MAX_HANDLED_BLOCKS - 1)
             tooManyBlocks(BZ_MAX_HANDLED_BLOCKS);
          currBlock++;
 
@@ -438,7 +474,12 @@ Int32 main ( Int32 argc, Char** argv )
    wrBlock = 0;
    while (True) {
       b = bsGetBit(bsIn);
-      if (b == 2) break;
+      if (b == 2) {
+         if (outFile != NULL) {
+            bsClose(bsWr);
+         }
+         break;
+      }
       buffHi = (buffHi << 1) | (buffLo >> 31);
       buffLo = (buffLo << 1) | (b & 1);
       if (bitsRead == 47+rbStart[wrBlock]) 
@@ -479,7 +520,7 @@ Int32 main ( Int32 argc, Char** argv )
 	 }
 	 /* Now split points to the start of the basename. */
          ofs  = split - outFileName;
-         sprintf (split, "rec%5d", wrBlock+1);
+         snprintf (split, BZ_MAX_FILENAME - ofs, "rec%5d", wrBlock+1);
          for (p = split; *p != 0; p++) if (*p == ' ') *p = '0';
          strcat (outFileName, inFileName + ofs);
 
@@ -488,7 +529,7 @@ Int32 main ( Int32 argc, Char** argv )
          fprintf ( stderr, "   writing block %d to `%s' ...\n",
                            wrBlock+1, outFileName );
 
-         outFile = fopen ( outFileName, "wb" );
+         outFile = fopenOutputSafely ( outFileName );
          if (outFile == NULL) {
             fprintf ( stderr, "%s: can't write `%s'\n",
                       progName, outFileName );
@@ -504,6 +545,8 @@ Int32 main ( Int32 argc, Char** argv )
          bsPutUChar ( bsWr, 0x53 ); bsPutUChar ( bsWr, 0x59 );
       }
    }
+
+   bsClose ( bsIn );
 
    fprintf ( stderr, "%s: finished\n", progName );
    return 0;

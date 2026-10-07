@@ -1,0 +1,53 @@
+# What `cmake --install` puts under the prefix, per layout: elf-1.0 and elf-1
+# (Linux and other ELF targets, by BZ2NG_SONAME), macos, mingw and msvc.  Each
+# line: the layouts it applies to, the path, and either nothing (a file),
+# "-> target" (a symbolic link) or "names X" (a file that records X as its
+# own name or as a library it loads).  Each name is that of the file in the
+# platform's own bzip2 package: Debian and Ubuntu's libbz2-1.0, libbz2-dev and
+# bzip2; Fedora's bzip2-libs, bzip2-devel, bzip2-static and bzip2; macOS's
+# /usr/lib/libbz2.1.0.dylib and /usr/bin; msys2's mingw-w64-bzip2; vcpkg's
+# bzip2 port.  Install directories are written @BINDIR@, @LIBDIR@,
+# @INCLUDEDIR@ and @MANDIR@, the absolute library directory @FULL_LIBDIR@,
+# and the debug suffix @POSTFIX@.
+
+elf-1.0,elf-1,macos,mingw,msvc  @INCLUDEDIR@/bzlib.h
+elf-1.0,elf-1,macos,mingw,msvc  @LIBDIR@/pkgconfig/bzip2.pc
+elf-1.0,elf-1,macos,mingw       @LIBDIR@/libbz2.a
+
+elf-1.0  @LIBDIR@/libbz2.so.1.0.8  names libbz2.so.1.0
+elf-1.0  @LIBDIR@/libbz2.so.1.0    -> libbz2.so.1.0.8
+elf-1.0  @LIBDIR@/libbz2.so.1      -> libbz2.so.1.0.8
+elf-1.0  @LIBDIR@/libbz2.so        -> libbz2.so.1.0
+elf-1.0  @BINDIR@/bzip2            names libbz2.so.1.0
+
+elf-1    @LIBDIR@/libbz2.so.1.0.8  names libbz2.so.1
+elf-1    @LIBDIR@/libbz2.so.1      -> libbz2.so.1.0.8
+elf-1    @LIBDIR@/libbz2.so        -> libbz2.so.1
+elf-1    @BINDIR@/bzip2            names libbz2.so.1
+
+macos    @LIBDIR@/libbz2.1.0.8.dylib  names @FULL_LIBDIR@/libbz2.1.0.dylib
+macos    @LIBDIR@/libbz2.1.0.dylib    -> libbz2.1.0.8.dylib
+macos    @LIBDIR@/libbz2.dylib        -> libbz2.1.0.dylib
+macos    @BINDIR@/bzip2               names @FULL_LIBDIR@/libbz2.1.0.dylib
+
+elf-1.0,elf-1,macos  @BINDIR@/bunzip2       -> bzip2
+elf-1.0,elf-1,macos  @BINDIR@/bzcat         -> bzip2
+elf-1.0,elf-1,macos  @BINDIR@/bzip2recover
+elf-1.0,elf-1,macos  @MANDIR@/man1/bzip2.1
+elf-1.0,elf-1,macos  @MANDIR@/man1/bunzip2.1       -> bzip2.1
+elf-1.0,elf-1,macos  @MANDIR@/man1/bzcat.1         -> bzip2.1
+elf-1.0,elf-1,macos  @MANDIR@/man1/bzip2recover.1  -> bzip2.1
+
+mingw    @BINDIR@/libbz2-1.dll
+mingw    @LIBDIR@/libbz2.dll.a
+mingw    @BINDIR@/bzip2.exe         names libbz2-1.dll
+mingw    @BINDIR@/bunzip2.exe       names libbz2-1.dll
+mingw    @BINDIR@/bzcat.exe         names libbz2-1.dll
+mingw    @BINDIR@/bzip2recover.exe
+mingw    @MANDIR@/man1/bzip2.1
+
+msvc     @BINDIR@/bz2@POSTFIX@.dll
+msvc     @LIBDIR@/bz2@POSTFIX@.lib
+msvc     @LIBDIR@/bz2_static@POSTFIX@.lib
+msvc     @BINDIR@/bzip2.exe         names bz2@POSTFIX@.dll
+msvc     @BINDIR@/bzip2recover.exe

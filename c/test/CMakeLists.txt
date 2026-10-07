@@ -146,9 +146,12 @@ endif()
 
 bzng_test_program(layout_test layout_test.c)
 add_test(NAME abi_layout COMMAND layout_test)
+# The public header is upstream's, byte for byte: reference/bzlib.h.f5dfc96 is
+# bzlib.h at that commit of sourceware.org/git/bzip2.git (1.0.8's header plus
+# its one later change), kept pristine so that the comparison is exact.
 add_test(NAME abi_header_unmodified
          COMMAND ${CMAKE_COMMAND} -E compare_files ${PROJECT_SOURCE_DIR}/bzlib.h
-                 ${CMAKE_CURRENT_SOURCE_DIR}/reference/bzlib.h)
+                 ${CMAKE_CURRENT_SOURCE_DIR}/reference/bzlib.h.f5dfc96)
 
 bzng_test_program(tier_identity tier_identity.c)
 add_test(NAME tier_identity
@@ -166,6 +169,36 @@ if(TARGET bz2_shared)
   add_test(NAME abi_exported_symbols
            COMMAND ${CMAKE_COMMAND} -DLIB=$<TARGET_FILE:bz2_shared> "-DEXPECTED=${BZ2NG_EXPORTED}"
                    ${_export_tool} -P ${CMAKE_CURRENT_SOURCE_DIR}/exported_symbols.cmake)
+endif()
+
+# `cmake --install` into a scratch prefix gives the files, links and library
+# names of the platform's bzip2 package (install_layout.txt).
+if(TARGET bz2_shared AND TARGET bzip2)
+  set(_postfix "")
+  if(APPLE)
+    set(_layout macos)
+    find_program(BZ2NG_OTOOL otool)
+    set(_name_tool -DOTOOL=${BZ2NG_OTOOL})
+  elseif(MINGW)
+    set(_layout mingw)
+    set(_name_tool -DOBJDUMP=${CMAKE_OBJDUMP})
+  elseif(WIN32)
+    set(_layout msvc)
+    set(_name_tool ${BZ2NG_SYMBOL_TOOL})
+    set(_postfix $<$<CONFIG:Debug>:d>)
+  else()
+    set(_layout elf-${BZ2NG_SONAME})
+    set(_name_tool -DOBJDUMP=${CMAKE_OBJDUMP})
+  endif()
+  add_test(NAME install_layout
+           COMMAND ${CMAKE_COMMAND} -DBUILD=${PROJECT_BINARY_DIR} -DCONFIG=$<CONFIG>
+                   -DPREFIX=${CMAKE_CURRENT_BINARY_DIR}/install_layout -DLAYOUT=${_layout}
+                   -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/install_layout.txt
+                   -DBINDIR=${CMAKE_INSTALL_BINDIR} -DLIBDIR=${CMAKE_INSTALL_LIBDIR}
+                   -DINCLUDEDIR=${CMAKE_INSTALL_INCLUDEDIR} -DMANDIR=${CMAKE_INSTALL_MANDIR}
+                   -DFULL_LIBDIR=${CMAKE_INSTALL_FULL_LIBDIR} -DPOSTFIX=${_postfix} ${_name_tool}
+                   -P ${CMAKE_CURRENT_SOURCE_DIR}/install_layout.cmake)
+  set_tests_properties(install_layout PROPERTIES SKIP_REGULAR_EXPRESSION "install_layout: skipped")
 endif()
 
 # bzip2's `make test`, and bzip2.c against stock libbz2 versus against bz2-ng.
@@ -199,9 +232,15 @@ if(TARGET bzip2 AND (_sh OR NOT CMAKE_HOST_WIN32))
   endif()
   target_link_libraries(bzip2_reference PRIVATE bz2_reference_plain)
   bzng_test_program(cli_tool cli_tool.c)
+  # The script runs a copy of bzip2 from another directory, where on Windows
+  # the DLL it loads must be beside it.
+  set(_bzip2_dll "")
+  if(WIN32 AND TARGET bz2_shared)
+    set(_bzip2_dll $<TARGET_FILE:bz2_shared>)
+  endif()
   add_test(NAME bzip2_cli_compare
            COMMAND ${_sh} ${CMAKE_CURRENT_SOURCE_DIR}/cli_compare.sh $<TARGET_FILE:bzip2_reference> $<TARGET_FILE:bzip2>
-                   $<TARGET_FILE:cli_tool> ${CMAKE_CURRENT_BINARY_DIR}/cli_compare)
+                   $<TARGET_FILE:cli_tool> ${CMAKE_CURRENT_BINARY_DIR}/cli_compare ${_bzip2_dll})
   if(_sh)
     set_tests_properties(bzip2_make_test bzip2_cli_compare
                          PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sh_dir}")

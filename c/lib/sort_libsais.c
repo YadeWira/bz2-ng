@@ -18,7 +18,7 @@
  * at a level whose alphabet k exceeds both 1000 and the level's free space.
  * Following the free space down the recursion shows that free space of at
  * least floor(n/2) - 2 at the top rules that out for every input of length n
- * (research/L1-libsais-fit.md, section 2): each level's free space minus its
+ * (docs/spec.md section 4.3): each level's free space minus its
  * length never decreases, and its alphabet is smaller than its length. The
  * work array leaves at least floor(n/2). libsais's malloc returns NULL here,
  * so if that bound were ever wrong a sort would fail with an internal error

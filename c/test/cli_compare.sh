@@ -4,13 +4,15 @@
 # (program path normalised) and exit status.  Inputs: the bzip2 samples,
 # generated text, concatenated streams, trailing garbage and zeros, truncated
 # streams, randomised-block streams, header-only, non-bzip2 and empty files,
-# and every bit flip of one sample.
-# usage: cli_compare.sh stock-bzip2 bz2ng-bzip2 cli_tool scratch-directory
+# and every bit flip of one sample.  Further arguments are files that the
+# bz2-ng program needs beside it (on Windows, the DLL it loads).
+# usage: cli_compare.sh stock-bzip2 bz2ng-bzip2 cli_tool scratch-directory [file...]
 set -u
 S=$1
 N=$2
 TOOL=$3
 W=$4
+shift 4
 REF=$(cd "$(dirname "$0")/reference" && pwd)
 rm -rf "$W"
 mkdir -p "$W"
@@ -24,6 +26,9 @@ esac
 mkdir -p stock ng
 cp "$S" stock/bzip2$x
 cp "$N" ng/bzip2$x
+for f in "$@"; do
+	cp "$f" ng/
+done
 S=$W/stock/bzip2$x
 N=$W/ng/bzip2$x
 cp "$REF"/sample*.bz2 "$REF"/sample*.ref .

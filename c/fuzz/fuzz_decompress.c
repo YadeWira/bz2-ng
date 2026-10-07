@@ -28,7 +28,7 @@
  *
  * After the first return other than BZ_OK libbz2 is not called again: its
  * manual allows only BZ2_bzDecompressEnd then, and resuming reaches undefined
- * behaviour inside libbz2 itself (research/M1e-decoder-api-test.md).  bz2-ng
+ * behaviour inside libbz2 itself (it crashes on some inputs).  bz2-ng
  * is called alone twice more and held to docs/spec.md section 2.5: once the
  * stream's trailer has been read (BZ_STREAM_END, or a combined-CRC mismatch,
  * which is when libbz2 is idle) it returns BZ_SEQUENCE_ERROR, otherwise the

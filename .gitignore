@@ -57,7 +57,7 @@ dkms.conf
 # Local-only scratch: reference clones, agent reports, handoff notes
 ephemeral/
 
-# Spike build and run outputs
+# Build directories and tool outputs
 build/
 build_*/
 build-*/

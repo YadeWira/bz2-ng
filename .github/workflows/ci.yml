@@ -46,7 +46,8 @@ jobs:
         # tiers, arm64 the scalar and NEON tiers. The tests iterate over
         # every tier the runner's CPU supports. Every build tests both
         # decoder layouts, so the in-formula job runs only the tests that
-        # depend on which one is the library's default.
+        # depend on which one is the library's default; it also takes
+        # Fedora's SONAME, so that its install layout is tested too.
         include:
           - name: x86-64 / gcc
             os: ubuntu-24.04
@@ -77,8 +78,8 @@ jobs:
           - name: x86-64 / gcc / in-formula decoder
             os: ubuntu-24.04
             cc: gcc
-            cmake_args: "-DBZ2NG_DECODER_IN_FORMULA=ON"
-            ctest_args: "-R 'memtest|tier_identity|abi_|bzip2_'"
+            cmake_args: "-DBZ2NG_DECODER_IN_FORMULA=ON -DBZ2NG_SONAME=1"
+            ctest_args: "-R 'memtest|tier_identity|abi_|bzip2_|install_layout'"
           - name: x86-64 / gcc / BZ_NO_STDIO
             os: ubuntu-24.04
             cc: gcc
@@ -174,6 +175,9 @@ jobs:
           wineserver -p < /dev/null > /dev/null 2>&1
           wineboot -u < /dev/null > /dev/null 2>&1
           ctest --test-dir c/build -j "$(nproc)" --output-on-failure --timeout 2400 -E 'mutate|(valid|crafted|capacity)_(scalar|sse4)'
+      # The installed files and the DLL name the programs load, in the log.
+      - name: Install layout
+        run: ctest --test-dir c/build -V -R '^install_layout$'
 
   # Windows x86-64 with MSVC: the runner image's Visual Studio (2026 on
   # windows-2025 today; CMake picks the newest it finds), Release, built with
@@ -205,9 +209,10 @@ jobs:
         run: cmake --build c/build --config Release --parallel "$NUMBER_OF_PROCESSORS" 2>&1 | tee build.log
       - name: Test
         run: ctest --test-dir c/build -C Release -j "$NUMBER_OF_PROCESSORS" --output-on-failure --timeout 2400 -E mutate
-      # The tiers this runner has, their common digest, and the DLL's exports.
-      - name: Tiers and exports
-        run: ctest --test-dir c/build -C Release -V -R '^(tier_identity|abi_exported_symbols)$'
+      # The tiers this runner has, their common digest, the DLL's exports and
+      # the installed files.
+      - name: Tiers, exports and install layout
+        run: ctest --test-dir c/build -C Release -V -R '^(tier_identity|abi_exported_symbols|install_layout)$'
       # BZ_NO_STDIO under cl: the library must reach no stdio symbol, which
       # the symbol test reads with dumpbin.
       - name: BZ_NO_STDIO build and its symbol test
