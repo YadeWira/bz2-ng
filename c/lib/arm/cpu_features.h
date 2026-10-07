@@ -27,8 +27,8 @@
 
 /*
  * Adapted from libdeflate 1.26 (lib/arm/cpu_features.h) for bz2-ng: AArch64
- * only, and only the features bz2-ng's NEON tier needs (NEON and the CRC32
- * instructions).
+ * only, and only the features bz2-ng's NEON tier needs (NEON, the CRC32
+ * instructions, and PMULL for its faster CRC kernel).
  */
 
 #ifndef LIB_ARM_CPU_FEATURES_H
@@ -40,9 +40,11 @@
 
 #define ARM_CPU_FEATURE_NEON		(1 << 0)
 #define ARM_CPU_FEATURE_CRC32		(1 << 1)
+#define ARM_CPU_FEATURE_PMULL		(1 << 2)
 
 #define HAVE_NEON(features)	((features) & ARM_CPU_FEATURE_NEON)
 #define HAVE_CRC32(features)	((features) & ARM_CPU_FEATURE_CRC32)
+#define HAVE_PMULL(features)	((features) & ARM_CPU_FEATURE_PMULL)
 
 #if defined(__linux__) || defined(__APPLE__)
 /* Runtime ARM CPU feature detection is supported. */

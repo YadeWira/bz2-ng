@@ -57,8 +57,8 @@ enum {
  * Per-stream memory layout of the block-proportional arrays (small = 0):
  *
  *   BZNG_LAYOUT_WIDE: 4-byte table entries for every block, and a separate
- *     symbol array that becomes the walk's output pool: 105 kB + 5 x block
- *     size, one block and 5 kB more than libbz2 documents.  The default.
+ *     symbol array that becomes the walk's output pool: 100 kB + 5 x block
+ *     size, one block more than libbz2 documents.  The default.
  *   BZNG_LAYOUT_FIT: a table of 3 bytes per row of the header digit's block
  *     size, inside libbz2's documented 100 kB + 4 x block size.  Blocks
  *     larger than three quarters of the block size use 3-byte entries
@@ -73,12 +73,10 @@ typedef enum {
 } bzng_layout;
 
 /*
- * Chains walked in lockstep for blocks of at least 64 Ki rows, per layout.
- * The walk's output pool keeps one chunk of slack per chain, and the
- * in-formula layout's bound leaves room for 16 chains, not 24.
+ * Chains walked in lockstep for blocks of at least 64 Ki rows, in both
+ * layouts.  The walk's output pool keeps one chunk of slack per chain.
  */
-#define BZNG_LANES_WIDE 24u
-#define BZNG_LANES_FIT	16u
+#define BZNG_LANES 24u
 
 /*
  * The layout BZ2_bzDecompressInit uses; the CMake option
@@ -165,6 +163,11 @@ typedef struct bzng_dstate {
 	u8 sel_pos[BZ_N_GROUPS];
 	u8 selector[BZ_MAX_SELECTORS];
 	u8 len[BZ_N_GROUPS][BZ_MAX_ALPHA_SIZE];
+	/*
+	 * Used from a block's header to the end of its symbol loop; from then
+	 * to the end of the block's output these bytes hold block finishing's
+	 * row -> F symbol guess table instead (dec_block.c).
+	 */
 	bzng_htable tab[BZ_N_GROUPS];
 
 	/* symbol loop */
@@ -189,7 +192,6 @@ typedef struct bzng_dstate {
 
 	/* block finishing */
 	u32 cftab[257];
-	u8 fsym[BZNG_FSYM_MAX];
 	u32 fsym_shift;
 
 	/* output stage */
@@ -291,6 +293,18 @@ bzng_br_take(bzng_bits *b, u32 n)
 void bzng_build_htable(bzng_htable *t, const u8 *length, s32 alpha_size);
 
 /*
+ * The code length held in a primary-table entry (its low 5 bits).  gcc
+ * computes e & 31 as a 16-bit operation and widens the result again, one
+ * more step on the group decoder's critical path; with BMI2 it is one bzhi.
+ */
+#if GCC_PREREQ(1, 0) && defined(__BMI2__)
+#  include <immintrin.h>
+#  define BZNG_CODE_LEN(e) _bzhi_u32((e), 5)
+#else
+#  define BZNG_CODE_LEN(e) ((e) & 31)
+#endif
+
+/*
  * Decodes one code from the top bits of buf (at least 20 meaningful bits:
  * real stream bits, or anything at all past the stream's available bits, see
  * bzng_decode_exact). Returns the code length and sets *sym, or 0 if the
@@ -300,9 +314,9 @@ static inline u32
 bzng_decode_code(const bzng_htable *t, u64 buf, u32 *sym)
 {
 	const u32 e = t->prim[buf >> (64 - BZNG_HUFF_K)];
-	if (likely(e & 31)) {
+	if (likely(BZNG_CODE_LEN(e))) {
 		*sym = e >> 5;
-		return e & 31;
+		return BZNG_CODE_LEN(e);
 	}
 	const u32 v = (u32)(buf >> (64 - BZNG_MAX_CODE));
 	for (u32 l = BZNG_HUFF_K + 1; l <= t->maxlen; l++) {

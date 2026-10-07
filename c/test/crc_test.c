@@ -10,7 +10,8 @@
  * bitwise reference: every length 0..2100 at 16 alignments from the initial
  * register, from other registers (0, arbitrary values), and continued across
  * arbitrary chunk splits, as the library uses them (a block's CRC is carried
- * from call to call).
+ * from call to call).  On AArch64 it also checks which kernel the dispatch
+ * selects for the CPU's features.
  */
 
 #include <stdio.h>
@@ -22,7 +23,7 @@
 #if BZNG_X86_TIERS
 #  include "x86/cpu_features.h"
 #elif defined(ARCH_ARM64) && CPU_IS_LITTLE_ENDIAN()
-#  include "arm/cpu_features.h"
+#  include "arm/crc32_impl.h"
 #endif
 
 static int failures;
@@ -130,6 +131,38 @@ check_kernel(const char *name, crc32_func_t f)
 	printf("crc kernel %s ok\n", name);
 }
 
+#if defined(ARCH_ARM64) && CPU_IS_LITTLE_ENDIAN()
+/*
+ * The dispatch's choice: for the NEON tier the PMULL kernel on a CPU with
+ * PMULL, the CRC32-instruction kernel on one without (as BZ2NG_NO_PMULL
+ * makes this one appear); the table kernel for the scalar tier.
+ */
+static void
+check_arm_selection(void)
+{
+	const u32 features = get_arm_cpu_features();
+	const char *no_pmull = getenv("BZ2NG_NO_PMULL");
+	const crc32_func_t got = arch_select_crc32_func();
+	crc32_func_t want = NULL;
+
+	if (no_pmull != NULL && *no_pmull != '\0' && HAVE_PMULL(features)) {
+		printf("FAIL BZ2NG_NO_PMULL left PMULL in the features\n");
+		failures++;
+	}
+	if (arch_select_tier() == BZNG_TIER_NEON)
+		want = HAVE_PMULL(features) ? bzng_crc32_pmull :
+					      bzng_crc32_armv8;
+	if (got != want) {
+		printf("FAIL the dispatch selected the wrong CRC kernel\n");
+		failures++;
+		return;
+	}
+	printf("crc selection %s ok\n", want == bzng_crc32_pmull ? "pmull" :
+					want == bzng_crc32_armv8 ? "armv8" :
+								   "slice16");
+}
+#endif
+
 int
 main(void)
 {
@@ -140,6 +173,10 @@ main(void)
 #if defined(ARCH_ARM64) && CPU_IS_LITTLE_ENDIAN()
 	if (HAVE_CRC32(get_arm_cpu_features()))
 		check_kernel("armv8", bzng_crc32_armv8);
+	if (HAVE_CRC32(get_arm_cpu_features()) &&
+	    HAVE_PMULL(get_arm_cpu_features()))
+		check_kernel("pmull", bzng_crc32_pmull);
+	check_arm_selection();
 #elif BZNG_X86_TIERS
 	if (HAVE_PCLMULQDQ(get_x86_cpu_features()))
 		check_kernel("pclmul", bzng_crc32_pclmul);

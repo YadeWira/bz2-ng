@@ -14,7 +14,7 @@ bz2-ng is a drop-in replacement for libbz2 1.0.8 with a faster single-threaded e
 
 - **Style and structure follow libdeflate** (`c/.clang-format`; `docs/spec.md` §4.8): tabs at width 8, 80 columns, kernel-style braces, `common_defs.h`, CPU feature detection and kernels under `lib/x86/` and `lib/arm/`, self-replacing dispatch pointers, template headers.
 - **Files that are libbz2's own code keep upstream formatting**: `c/bzlib.h`, `c/programs/`, `c/test/reference/` are unmodified; `c/lib/bzlib.c` and `bzlib_private.h` are lightly altered. The legacy drivers (`compress.c`, `decompress.c`) deliberately keep libbz2's state machines recognisable.
-- **Kernel tiers are chosen at run time** and every tier must produce the same bytes. `BZ2NG_TIER` exists for tests.
+- **Kernel tiers are chosen at run time** and every tier must produce the same bytes. `BZ2NG_TIER` exists for tests, and on AArch64 `BZ2NG_NO_PMULL`.
 - **Correctness evidence is the differential testers**, which drive stock libbz2 and bz2-ng with identical calls. Build and test: `cmake -S c -B c/build && cmake --build c/build && ctest --test-dir c/build`.
 - Every optimisation needs a benchmark it must not regress. Timings are single-threaded and compared with libbz2 built by the same compiler. Time a change in rounds interleaved with its baseline and with a second build of the baseline as a control: code placement alone moves a cell by 1–3% (`research/M1d-decoder-tuning.md`, `research/M1f-table-build-order.md`). Where a change gains on one compiler and machine and loses on another, clang on AArch64 and gcc on x86-64 count most: a small loss with gcc on AArch64 or clang on x86-64 is acceptable for a gain there (`docs/spec.md` §3).
 

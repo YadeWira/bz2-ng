@@ -37,12 +37,29 @@ u32 bzng_crc32_slice16(u32 crc, const u8 *p, size_t len);
 
 /*
  * Instruction-set kernels, each in its own translation unit and only called
- * on CPUs with the instructions: AArch64 CRC32 (arm/crc32_armv8.c), x86
- * PCLMULQDQ with SSE4.1 (x86/crc32_pclmul.c), and VPCLMULQDQ on 256-bit
- * vectors with AVX2 (x86/crc32_vpclmul.c).
+ * on CPUs with the instructions: AArch64 CRC32 (arm/crc32_armv8.c), AArch64
+ * PMULL with CRC32 (arm/crc32_pmull.c), x86 PCLMULQDQ with SSE4.1
+ * (x86/crc32_pclmul.c), and VPCLMULQDQ on 256-bit vectors with AVX2
+ * (x86/crc32_vpclmul.c).
  */
 u32 bzng_crc32_armv8(u32 crc, const u8 *p, size_t len);
+u32 bzng_crc32_pmull(u32 crc, const u8 *p, size_t len);
 u32 bzng_crc32_pclmul(u32 crc, const u8 *p, size_t len);
 u32 bzng_crc32_vpclmul(u32 crc, const u8 *p, size_t len);
+
+/*
+ * x^D mod P for the folding distances of the carry-less kernels
+ * (P = 0x104c11db7; x86/crc32_pclmul.c describes the method).
+ */
+#define BZNG_K_1088 0x10bd4d7cu
+#define BZNG_K_1024 0x567fddebu
+#define BZNG_K_576  0x8833794cu
+#define BZNG_K_512  0xe6228b11u
+#define BZNG_K_448  0x64bf7a9bu
+#define BZNG_K_384  0x8c3828a8u
+#define BZNG_K_320  0x569700e5u
+#define BZNG_K_256  0x75be46b7u
+#define BZNG_K_192  0xc5b9cd4cu
+#define BZNG_K_128  0xe8a45605u
 
 #endif /* LIB_CRC32_H */

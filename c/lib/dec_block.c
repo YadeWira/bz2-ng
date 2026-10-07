@@ -70,6 +70,20 @@ bzng_build_htable(bzng_htable *t, const u8 *length, s32 alpha_size)
 		const u16 *sp = t->perm + t->first_idx[l];
 		for (u32 k = 0; k < count[l] && pos < size; k++) {
 			const u16 e = (u16)(sp[k] << 5 | l);
+#if GCC_PREREQ(1, 0)
+			/*
+			 * gcc stores the entries one at a time; four per
+			 * 8-byte store (spans are powers of two, so the
+			 * stores end at the code's last slot).
+			 */
+			if (span >= 4) {
+				const u64 e4 = 0x0001000100010001ull * e;
+				for (u32 j = 0; j < span; j += 4)
+					memcpy(&t->prim[pos + j], &e4, 8);
+				pos += span;
+				continue;
+			}
+#endif
 			for (u32 j = 0; j < span; j++)
 				t->prim[pos + j] = e;
 			pos += span;
@@ -120,12 +134,33 @@ cursors(bzng_dstate *s, u32 h[4][256], u32 cf[4][256])
 }
 
 /*
- * Row -> F symbol guess: fsym[q] is the F symbol of row q << shift; the true
+ * The row -> F symbol guess table.  It occupies the Huffman tables' bytes,
+ * which nothing reads between the end of a block's symbol loop and the next
+ * block header, while the guess table is needed only from block finishing
+ * to the end of the block's output.
+ */
+static inline u8 *
+guess_table(bzng_dstate *s)
+{
+	return (u8 *)(void *)s->tab;
+}
+
+/* guess_table() for reading. */
+static inline const u8 *
+guess_table_r(const bzng_dstate *s)
+{
+	return (const u8 *)(const void *)s->tab;
+}
+
+/*
+ * Row -> F symbol guess: entry q is the F symbol of row q << shift; the true
  * symbol of a row is that or a later one (F is non-decreasing).
  */
 static void
 build_fsym(bzng_dstate *s, u32 n)
 {
+	STATIC_ASSERT(BZNG_FSYM_MAX <= sizeof(s->tab));
+	u8 *const fsym = guess_table(s);
 	u32 sh = 0;
 	while (((n - 1) >> sh) >= BZNG_FSYM_MAX)
 		sh++;
@@ -136,7 +171,7 @@ build_fsym(bzng_dstate *s, u32 n)
 		const u32 r = q << sh;
 		while (s->cftab[c + 1] <= r)
 			c++;
-		s->fsym[q] = (u8)c;
+		fsym[q] = (u8)c;
 	}
 }
 
@@ -147,7 +182,7 @@ build_fsym(bzng_dstate *s, u32 n)
 static inline u8
 row_symbol(const bzng_dstate *s, u32 row)
 {
-	u32 c = s->fsym[row >> s->fsym_shift];
+	u32 c = guess_table_r(s)[row >> s->fsym_shift];
 	while (row >= s->cftab[c + 1])
 		c++;
 	return (u8)c;
@@ -157,9 +192,36 @@ row_symbol(const bzng_dstate *s, u32 row)
 
 /*
  * A 3-byte table entry is little-endian on every target: byte 0 holds bits
- * 0-7, byte 1 bits 8-15 and byte 2 bits 16-23, of which bit 23 is the
- * splitter mark.  build_t and mark_splitters address bytes 1 and 2 directly.
+ * 0-7, byte 1 bits 8-15 and byte 2 bits 16-23.  Bit 23 is the splitter mark
+ * and bit 22 the guess mark: the row's F symbol is not the guess table's.
+ * build_t, mark_guess_misses and mark_splitters address bytes 1 and 2
+ * directly.
  */
+#define SPLIT3 0x800000u
+#define GUESS3 0x400000u
+
+/*
+ * Sets the guess mark on every 3-byte entry whose row's F symbol differs
+ * from the guess table's entry for its group of rows, so that the walk can
+ * take every other row's symbol from the guess table without checking it.
+ * Those are the rows of each symbol that starts inside a group, up to the end
+ * of that group: at most one group per symbol.
+ */
+static void
+mark_guess_misses(bzng_dstate *s)
+{
+	const u32 gmask = (1u << s->fsym_shift) - 1;
+	for (int c = 0; c < 256; c++) {
+		u32 r = s->cftab[c];
+		u32 end = s->cftab[c + 1];
+		if ((r & gmask) == 0)
+			continue;
+		if (end > (r | gmask) + 1)
+			end = (r | gmask) + 1;
+		for (; r < end; r++)
+			s->tbl[3 * (size_t)r + 2] |= GUESS3 >> 16;
+	}
+}
 
 /*
  * Stores v (< 2^24) as entry j with one 4-byte store; byte 3j+3 (the next
@@ -273,13 +335,6 @@ build_t(bzng_dstate *s, u32 n, int fit)
 	}
 }
 
-/* Chains walked for the largest blocks; the pool's slack is sized for it. */
-static u32
-max_lanes(const bzng_dstate *s)
-{
-	return s->layout == BZNG_LAYOUT_WIDE ? BZNG_LANES_WIDE : BZNG_LANES_FIT;
-}
-
 /* Index of `row` in the sorted splitter list (row must be a splitter). */
 static u32
 seg_index(const bzng_dstate *s, u32 row)
@@ -325,13 +380,13 @@ mark_splitters(bzng_dstate *s, u32 n, int fit)
 	s->n_seg = m;
 	for (u32 k = 0; k < m; k++) {
 		if (fit)
-			s->tbl[3 * (size_t)s->seg_row[k] + 2] |= 0x80;
+			s->tbl[3 * (size_t)s->seg_row[k] + 2] |= SPLIT3 >> 16;
 		else
 			((u32 *)(void *)s->tbl)[s->seg_row[k]] |= 0x80000000u;
 	}
 	s->seg_origin = seg_index(s, op);
 	if (n >= 65536)
-		return max_lanes(s);
+		return BZNG_LANES;
 	if (n >= 16384)
 		return 8;
 	if (m >= 2)
@@ -412,17 +467,29 @@ seg_end(bzng_dstate *s, walk_lane *ln)
  * One step of a lane: emits the current row's F byte and follows T, or ends
  * the segment at a marked row. Returns 0 when the lane has nothing left.
  * pf: prefetch the next row's table entry as soon as its index is known.
+ * tbl and fsh are the caller's copies of s->tbl and s->fsym_shift, which a
+ * prefetching walk of 3-byte entries uses instead of the state: the pool's
+ * byte stores may alias the state, so reading s reloads them on every step.
+ * The other walks read the state, which measured faster for them (4-byte
+ * entries with clang on Zen 5, the small walks with Apple clang).
  */
 static forceinline int
-lane_step(bzng_dstate *s, walk_pool *w, walk_lane *ln, int fit, int pf)
+lane_step(bzng_dstate *s, walk_pool *w, walk_lane *ln, const u8 *tbl, u32 fsh,
+	  int fit, int pf)
 {
 	u32 e, next;
 	u8 sym;
 	if (fit) {
-		e = load3(s->tbl, ln->p);
-		if (unlikely(e & 0x800000u))
-			goto seg_done;
-		sym = row_symbol(s, ln->p);
+		e = load3(pf ? tbl : s->tbl, ln->p);
+		if (unlikely(e & (SPLIT3 | GUESS3))) {
+			if (e & SPLIT3)
+				goto seg_done;
+			sym = row_symbol(s, ln->p);
+		} else {
+			const u8 *const guess = guess_table_r(s);
+
+			sym = guess[ln->p >> (pf ? fsh : s->fsym_shift)];
+		}
 		next = e & PMASK;
 	} else {
 		e = ((const u32 *)(const void *)s->tbl)[ln->p];
@@ -432,7 +499,8 @@ lane_step(bzng_dstate *s, walk_pool *w, walk_lane *ln, int fit, int pf)
 		next = (e >> 8) & PMASK;
 	}
 	if (pf)
-		prefetchr(s->tbl + (fit ? 3 : 4) * (size_t)next);
+		prefetchr(fit ? tbl + 3 * (size_t)next :
+				s->tbl + 4 * (size_t)next);
 	if (unlikely(ln->out == ln->end))
 		new_chunk(w, ln);
 	*ln->out++ = sym;
@@ -464,6 +532,8 @@ seg_done:
 	static void walk_##K##_##FIT(bzng_dstate *s, walk_pool *w)             \
 	{                                                                      \
 		const int pf = (K) >= PREFETCH_MIN_LANES;                      \
+		const u8 *const tbl = s->tbl;                                  \
+		const u32 fsh = (FIT) ? s->fsym_shift : 0;                     \
 		walk_lane ln[K];                                               \
 		u32 active = 0;                                                \
 		while (active < (K) && w->next_split < s->n_seg) {             \
@@ -480,6 +550,7 @@ seg_done:
 				UNROLL_FULL for (int k = 0; k < (K);           \
 						 k++) if (!lane_step(s, w,     \
 								     &ln[k],   \
+								     tbl, fsh, \
 								     FIT, pf)) \
 					dead |= 1u << k;                       \
 			}                                                      \
@@ -491,7 +562,8 @@ seg_done:
 		}                                                              \
 		while (active > 0) {                                           \
 			for (u32 k = 0; k < active; k++) {                     \
-				if (!lane_step(s, w, &ln[k], FIT, pf)) {       \
+				if (!lane_step(s, w, &ln[k], tbl, fsh, FIT,    \
+					       pf)) {                          \
 					ln[k] = ln[--active];                  \
 					k--;                                   \
 				}                                              \
@@ -502,12 +574,11 @@ seg_done:
 DEFINE_WALK(1, 0)
 DEFINE_WALK(2, 0)
 DEFINE_WALK(8, 0)
-DEFINE_WALK(16, 0)
 DEFINE_WALK(24, 0)
 DEFINE_WALK(1, 1)
 DEFINE_WALK(2, 1)
 DEFINE_WALK(8, 1)
-DEFINE_WALK(16, 1)
+DEFINE_WALK(24, 1)
 
 /* Walks every segment with the given number of lanes and table width. */
 static void
@@ -516,12 +587,7 @@ walk(bzng_dstate *s, u32 lanes, int fit)
 	walk_pool w = {s->L, s->chunk_next, 0, 0};
 	switch (lanes) {
 	case 24:
-		/* only the wide layout, whose entries are all 4-byte */
-		ASSERT(!fit);
-		walk_24_0(s, &w);
-		break;
-	case 16:
-		fit ? walk_16_1(s, &w) : walk_16_0(s, &w);
+		fit ? walk_24_1(s, &w) : walk_24_0(s, &w);
 		break;
 	case 8:
 		fit ? walk_8_1(s, &w) : walk_8_0(s, &w);
@@ -603,8 +669,10 @@ bzng_finish_block(bzng_dstate *s)
 		const int fit = s->layout == BZNG_LAYOUT_FIT &&
 				4 * (size_t)n > s->tbl_bytes;
 		build_t(s, n, fit);
-		if (fit)
+		if (fit) {
 			build_fsym(s, n);
+			mark_guess_misses(s);
+		}
 		const u32 lanes = mark_splitters(s, n, fit);
 		walk(s, lanes, fit);
 		ASSERT(s->cftab[256] == n);
@@ -751,8 +819,7 @@ bzng_size_stream_arrays(bzng_dstate *s)
 	s->tbl_bytes = ((s->layout == BZNG_LAYOUT_FIT ? 3 : 4) * (size_t)nmax +
 			8 + 15) &
 		       ~(size_t)15;
-	s->chunk_cap =
-		(nmax + (max_lanes(s) + 1) * BZNG_CHUNK) / BZNG_CHUNK + 1;
+	s->chunk_cap = (nmax + (BZNG_LANES + 1) * BZNG_CHUNK) / BZNG_CHUNK + 1;
 	s->seg_cap = nmax / BZNG_SEG_ROWS + 2;
 	s->area_bytes = s->tbl_bytes + (size_t)s->chunk_cap * BZNG_CHUNK +
 			(size_t)s->chunk_cap * 4 + (size_t)s->seg_cap * 16;

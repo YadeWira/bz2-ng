@@ -1,9 +1,10 @@
 /*
  * x86/crc32_clmul.h - helpers of the carry-less CRC kernels
  *
- * Folding constants and helpers shared by the two carry-less CRC kernels
- * (crc32_pclmul.c, crc32_vpclmul.c); see crc32_pclmul.c for the method. Include
- * only from translation units compiled with PCLMULQDQ and SSE4.1 enabled.
+ * Helpers shared by the two carry-less CRC kernels (crc32_pclmul.c,
+ * crc32_vpclmul.c), whose folding constants are in ../crc32.h; see
+ * crc32_pclmul.c for the method. Include only from translation units
+ * compiled with PCLMULQDQ and SSE4.1 enabled.
  *
  * Part of bz2-ng; MIT licence (see LICENSE).
  */
@@ -13,18 +14,6 @@
 #include <immintrin.h>
 
 #include "../crc32.h"
-
-/* x^D mod P for the folding distances used (P = 0x104c11db7). */
-#define BZNG_K_576  0x8833794cu
-#define BZNG_K_512  0xe6228b11u
-#define BZNG_K_448  0x64bf7a9bu
-#define BZNG_K_384  0x8c3828a8u
-#define BZNG_K_320  0x569700e5u
-#define BZNG_K_256  0x75be46b7u
-#define BZNG_K_192  0xc5b9cd4cu
-#define BZNG_K_128  0xe8a45605u
-#define BZNG_K_1088 0x10bd4d7cu
-#define BZNG_K_1024 0x567fddebu
 
 /* The 16 bytes of v in reverse order. */
 static inline __m128i

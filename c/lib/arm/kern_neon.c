@@ -6,8 +6,9 @@
 
 /*
  * NEON is baseline on AArch64, so this needs no special compiler flags; the
- * tier's CRC kernel (the CRC32 instructions) is arm/crc32_armv8.c.  Compiles
- * to nothing on other architectures and on big-endian AArch64 (kern.h).
+ * tier's CRC kernels are arm/crc32_pmull.c (PMULL) and arm/crc32_armv8.c (the
+ * CRC32 instructions alone).  Compiles to nothing on other architectures and
+ * on big-endian AArch64 (kern.h).
  */
 
 #include "../lib_common.h"

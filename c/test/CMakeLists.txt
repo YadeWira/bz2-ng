@@ -137,6 +137,12 @@ add_test(NAME sais_symbols COMMAND ${CMAKE_COMMAND} ${_sais_args} -P ${CMAKE_CUR
 
 bzng_test_program(crc_test crc_test.c)
 bzng_tier_test(crc $<TARGET_FILE:crc_test>)
+if(BZ2NG_ARCH STREQUAL "aarch64")
+  # The NEON tier as on a core without PMULL: the dispatch must fall back to
+  # the CRC32-instruction kernel.
+  add_test(NAME crc_neon_nopmull COMMAND crc_test)
+  set_tests_properties(crc_neon_nopmull PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "BZ2NG_TIER=neon;BZ2NG_NO_PMULL=1")
+endif()
 
 bzng_test_program(layout_test layout_test.c)
 add_test(NAME abi_layout COMMAND layout_test)

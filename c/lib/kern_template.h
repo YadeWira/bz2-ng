@@ -863,16 +863,24 @@ mtf_tail_move(u8 *m, u32 nn, u8 carry_byte)
 }
 
 /*
- * The run/literal selects of SYMBOL_STEP: KEEP_LIT is v for a literal and 0
- * for a run symbol, KEEP_RUN the reverse.  clang compiles the conditional
- * expressions to conditional moves.  gcc turns them into branches on the
- * run/literal pattern, which is close to random, so for gcc they are mask
- * arithmetic; clang is slower with the masks on x86.
+ * The run/literal selects of SYMBOL_STEP: IS_RUN is 1 for RUNA and RUNB
+ * (symbols 0 and 1) and 0 for any other symbol, KEEP_LIT is v for a literal
+ * and 0 for a run symbol, KEEP_RUN the reverse.  clang compiles the
+ * comparison and the conditional expressions to conditional moves.  gcc
+ * turns the conditional expressions into branches on the run/literal
+ * pattern, which is close to random, so for gcc they are mask arithmetic;
+ * clang is slower with the masks on x86.  For gcc the flag is the sign of
+ * sym - 2 (symbols are below 2^31) rather than a comparison: gcc 13 writes a
+ * comparison's result into the low byte of the register that holds the
+ * previous symbol's output byte, which makes every symbol wait for the
+ * previous one's vector shuffle.
  */
 #  if GCC_PREREQ(1, 0)
+#    define IS_RUN(sym)		(((sym) - 2u) >> 31)
 #    define KEEP_LIT(is_run, v) ((v) & ((is_run) - 1u))
 #    define KEEP_RUN(is_run, v) ((v) & (0u - (is_run)))
 #  else
+#    define IS_RUN(sym)		((sym) < 2)
 #    define KEEP_LIT(is_run, v) ((is_run) ? 0 : (v))
 #    define KEEP_RUN(is_run, v) ((is_run) ? (v) : 0)
 #  endif
@@ -908,7 +916,7 @@ mtf_tail_move(u8 *m, u32 nn, u8 carry_byte)
 			  (res_) = BZNG_EOB;                                  \
 			  break;                                              \
 		  }                                                           \
-		  const u32 is_run_ = sy_ < 2;                                \
+		  const u32 is_run_ = IS_RUN(sy_);                            \
 		  const u32 flush_ = KEEP_LIT(is_run_, run);                  \
 		  if (unlikely((is_run_ & (rshift >= 21)) ||                  \
 			       nb + flush_ + !is_run_ > nmax)) {              \
@@ -1067,6 +1075,7 @@ out:
 }
 
 #undef SYMBOL_STEP
+#undef IS_RUN
 #undef KEEP_LIT
 #undef KEEP_RUN
 

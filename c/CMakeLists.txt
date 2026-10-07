@@ -25,7 +25,7 @@ option(BZ2NG_BUILD_FUZZ
        "Build the libFuzzer targets in fuzz/ (clang with libFuzzer; everything built with ASan and UBSan; needs BZ2NG_BUILD_TESTS)"
        OFF)
 option(BZ2NG_DECODER_IN_FORMULA
-       "Decoder memory inside libbz2's documented 100 kB + 4 x block size (default: 105 kB + 5 x block size, faster on full-size blocks)"
+       "Decoder memory inside libbz2's documented 100 kB + 4 x block size (default: 100 kB + 5 x block size, faster on full-size blocks)"
        OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -121,6 +121,7 @@ set(BZ2NG_SOURCES
   lib/kern_scalar.c      # portable kernel tier
   lib/arm/cpu_features.c
   lib/arm/crc32_armv8.c  # ISA: AArch64 CRC32
+  lib/arm/crc32_pmull.c  # ISA: AArch64 CRC32 and PMULL
   lib/arm/kern_neon.c    # AArch64 NEON tier (baseline, no flags)
   lib/x86/cpu_features.c
   lib/x86/crc32_pclmul.c # ISA: x86-64 PCLMULQDQ
@@ -142,6 +143,7 @@ function(bzng_isa_flags)
     set_source_files_properties(lib/x86/crc32_vpclmul.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mpclmul;-mvpclmulqdq")
   elseif(BZ2NG_ARCH STREQUAL "aarch64")
     set_source_files_properties(lib/arm/crc32_armv8.c PROPERTIES COMPILE_OPTIONS "-march=armv8-a+crc")
+    set_source_files_properties(lib/arm/crc32_pmull.c PROPERTIES COMPILE_OPTIONS "-march=armv8-a+crc+crypto")
   endif()
 endfunction()
 bzng_isa_flags()

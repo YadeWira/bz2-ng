@@ -23,6 +23,7 @@ fi
     lib/kern.h lib/kern_template.h lib/kern_scalar.c lib/vec.h \
     lib/crc32.c lib/crc32.h lib/crc32_table.c lib/lib_common.h lib/utils.c \
     lib/arm/kern_impl.h lib/arm/kern_neon.c lib/arm/crc32_impl.h lib/arm/crc32_armv8.c \
+    lib/arm/crc32_pmull.c \
     lib/x86/kern_impl.h lib/x86/kern_sse4.c lib/x86/kern_avx2.c lib/x86/crc32_impl.h \
     lib/x86/crc32_clmul.h lib/x86/crc32_pclmul.c lib/x86/crc32_vpclmul.c \
     test/enc_difftest.c test/dec_difftest.c test/memtest.c test/sort_test.c \

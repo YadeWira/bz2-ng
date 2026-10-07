@@ -9,7 +9,7 @@
  *
  *   compression                        400,000 + 8 x block size
  *   decompression, in-formula layout   100,000 + 4 x block size
- *   decompression, wide layout         105,000 + 5 x block size
+ *   decompression, wide layout         100,000 + 5 x block size
  *   decompression, small = 1           100,000 + 2.5 x block size
  *   BZ2_bzDecompressInit's default     the bound of the configured layout
  *
@@ -199,7 +199,7 @@ main(int argc, char **argv)
 							 0, misalign);
 			const size_t enc_budget = 400000 + 8 * block,
 				     fit_budget = 100000 + 4 * block;
-			const size_t wide_budget = 105000 + 5 * block,
+			const size_t wide_budget = 100000 + 5 * block,
 				     small_budget = 100000 + 5 * block / 2;
 			const size_t dflt_budget =
 				BZNG_DEFAULT_LAYOUT == BZNG_LAYOUT_FIT ?

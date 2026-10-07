@@ -27,8 +27,8 @@
 
 /*
  * Adapted from libdeflate 1.26 (lib/arm/cpu_features.c) for bz2-ng: AArch64
- * on Linux and Apple platforms, the features NEON and CRC32, and the
- * BZ2NG_TIER override.
+ * on Linux and Apple platforms, the features NEON, CRC32 and PMULL, and the
+ * BZ2NG_TIER and BZ2NG_NO_PMULL overrides.
  */
 
 /*
@@ -120,6 +120,8 @@ static u32 query_arm_cpu_features(void)
 	STATIC_ASSERT(sizeof(long) == 8);
 	if (hwcap & (1 << 1))	/* HWCAP_ASIMD */
 		features |= ARM_CPU_FEATURE_NEON;
+	if (hwcap & (1 << 4))	/* HWCAP_PMULL */
+		features |= ARM_CPU_FEATURE_PMULL;
 	if (hwcap & (1 << 7))	/* HWCAP_CRC32 */
 		features |= ARM_CPU_FEATURE_CRC32;
 	return features;
@@ -137,6 +139,7 @@ static const struct {
 } feature_sysctls[] = {
 	{ "hw.optional.neon",		  ARM_CPU_FEATURE_NEON },
 	{ "hw.optional.AdvSIMD",	  ARM_CPU_FEATURE_NEON },
+	{ "hw.optional.arm.FEAT_PMULL",	  ARM_CPU_FEATURE_PMULL },
 	{ "hw.optional.armv8_crc32",	  ARM_CPU_FEATURE_CRC32 },
 };
 
@@ -171,14 +174,18 @@ volatile u32 bzng_arm_cpu_features = 0;
 /*
  * Initialize bzng_arm_cpu_features.  errno is preserved: the queries may fail
  * and set it, and programs such as bzip2 report errno after a library call
- * returns an error.
+ * returns an error.  A non-empty $BZ2NG_NO_PMULL removes PMULL, so that tests
+ * can run the NEON tier as on a core without it.
  */
 void bzng_init_arm_cpu_features(void)
 {
 	int saved_errno = errno;
 	u32 features = query_arm_cpu_features();
+	const char *no_pmull = getenv("BZ2NG_NO_PMULL");
 
 	apply_tier_override(&features, arm_tiers, ARRAY_LEN(arm_tiers));
+	if (no_pmull != NULL && *no_pmull != '\0')
+		features &= ~ARM_CPU_FEATURE_PMULL;
 
 	bzng_arm_cpu_features = features | ARM_CPU_FEATURES_KNOWN;
 	errno = saved_errno;
