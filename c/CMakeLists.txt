@@ -33,6 +33,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+include(CheckCCompilerFlag)
 include(GNUInstallDirs)
 
 set(CMAKE_C_STANDARD 11)
@@ -140,8 +141,17 @@ function(bzng_isa_flags)
     # __AVX2__ for the AVX2 tier and VEX-encodes all of a file's vector code.
     set_source_files_properties(lib/x86/kern_avx2.c lib/x86/crc32_vpclmul.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
   elseif(BZ2NG_ARCH STREQUAL "x86_64")
-    set_source_files_properties(lib/x86/kern_sse4.c PROPERTIES COMPILE_OPTIONS "-march=x86-64-v2")
-    set_source_files_properties(lib/x86/kern_avx2.c PROPERTIES COMPILE_OPTIONS "-march=x86-64-v3")
+    # gcc before 11 and clang before 12 do not know the level names; for them
+    # the same instruction sets are named one by one.
+    set(_v2 -mcx16 -msahf -mpopcnt -msse3 -msse4.1 -msse4.2 -mssse3)
+    set(_v3 ${_v2} -mavx -mavx2 -mbmi -mbmi2 -mf16c -mfma -mlzcnt -mmovbe -mxsave)
+    check_c_compiler_flag(-march=x86-64-v3 BZ2NG_HAVE_MARCH_LEVELS)
+    if(BZ2NG_HAVE_MARCH_LEVELS)
+      set(_v2 -march=x86-64-v2)
+      set(_v3 -march=x86-64-v3)
+    endif()
+    set_source_files_properties(lib/x86/kern_sse4.c PROPERTIES COMPILE_OPTIONS "${_v2}")
+    set_source_files_properties(lib/x86/kern_avx2.c PROPERTIES COMPILE_OPTIONS "${_v3}")
     set_source_files_properties(lib/x86/crc32_pclmul.c PROPERTIES COMPILE_OPTIONS "-msse4.1;-mpclmul")
     set_source_files_properties(lib/x86/crc32_vpclmul.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mpclmul;-mvpclmulqdq")
   elseif(BZ2NG_ARCH STREQUAL "aarch64")
@@ -269,6 +279,35 @@ if(BZ2NG_BUILD_SHARED AND NOT BZ2NG_NO_STDIO)
   # told not to warn about it.
   if(MINGW)
     target_link_options(bz2_shared PRIVATE -static-libgcc "LINKER:--enable-stdcall-fixup")
+  endif()
+  # A program built with bzlib.h on 32-bit x86 calls the stdcall names
+  # (BZ2_bzRead@16), which the import library must hold.  ld from binutils
+  # 2.40 writes the .def file's undecorated names into it instead (2.42 writes
+  # the decorated ones), so dlltool rewrites it from the decorated names, each
+  # importing the DLL's undecorated export (-k).  The decorations are the
+  # functions' argument bytes in bzlib.h; the abi_dll_imports test links a
+  # program that calls all of them.
+  if(MINGW AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(_stdcall_names
+      BZ2_bzCompressInit@16 BZ2_bzCompress@8 BZ2_bzCompressEnd@4
+      BZ2_bzDecompressInit@12 BZ2_bzDecompress@4 BZ2_bzDecompressEnd@4
+      BZ2_bzBuffToBuffCompress@28 BZ2_bzBuffToBuffDecompress@24 BZ2_bzlibVersion@0
+      BZ2_bzReadOpen@24 BZ2_bzReadClose@8 BZ2_bzReadGetUnused@16 BZ2_bzRead@16
+      BZ2_bzWriteOpen@20 BZ2_bzWrite@16 BZ2_bzWriteClose@20 BZ2_bzWriteClose64@28
+      BZ2_bzopen@8 BZ2_bzdopen@8 BZ2_bzread@12 BZ2_bzwrite@12 BZ2_bzflush@4 BZ2_bzclose@4 BZ2_bzerror@8)
+    list(TRANSFORM _stdcall_names REPLACE "@[0-9]+$" "" OUTPUT_VARIABLE _undecorated)
+    if(NOT _undecorated STREQUAL BZ2NG_EXPORTED)
+      message(FATAL_ERROR "the stdcall names for the import library do not match BZ2NG_EXPORTED")
+    endif()
+    if(NOT CMAKE_DLLTOOL)
+      message(FATAL_ERROR "32-bit mingw-w64 needs dlltool for the import library; set CMAKE_DLLTOOL")
+    endif()
+    list(JOIN _stdcall_names "\n  " _list)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bz2-stdcall.def "EXPORTS\n  ${_list}\n")
+    add_custom_command(TARGET bz2_shared POST_BUILD
+                       COMMAND ${CMAKE_DLLTOOL} -m i386 -k -d ${CMAKE_CURRENT_BINARY_DIR}/bz2-stdcall.def
+                               -D $<TARGET_FILE_NAME:bz2_shared> -l $<TARGET_LINKER_FILE:bz2_shared>
+                       VERBATIM)
   endif()
 endif()
 
