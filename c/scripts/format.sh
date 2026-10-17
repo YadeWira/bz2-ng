@@ -19,7 +19,7 @@ fi
 "$CF" -i \
     lib/compress.c lib/decompress.c lib/dec.h lib/dec_block.c \
     lib/enc.h lib/enc_block.c lib/enc_huff.c lib/enc_sort.c \
-    lib/sort.h lib/sort_libsais.c \
+    lib/sort.h lib/sort_libsais.c lib/sort_recursion.h \
     lib/kern.h lib/kern_template.h lib/kern_scalar.c lib/vec.h \
     lib/crc32.c lib/crc32.h lib/crc32_table.c lib/lib_common.h lib/utils.c \
     lib/arm/kern_impl.h lib/arm/kern_neon.c lib/arm/crc32_impl.h lib/arm/crc32_armv8.c \

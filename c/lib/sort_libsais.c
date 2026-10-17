@@ -3,7 +3,9 @@
  *
  * Part of bz2-ng; MIT licence (see LICENSE). This file compiles libsais
  * (third_party/libsais/, by Ilya Grebnov), which is licensed under
- * Apache-2.0 WITH LLVM-exception: see licenses/libsais-1a696e6.txt.
+ * Apache-2.0 WITH LLVM-exception: see licenses/libsais-1a696e6.txt, and
+ * sort_recursion.h, derived from Yuta Mori's sais-lite (MIT): see
+ * licenses/sais-lite-2.4.1.txt.
  */
 
 /*
@@ -21,10 +23,13 @@
  * (docs/spec.md section 4.3): each level's free space minus its
  * length never decreases, and its alphabet is smaller than its length. Patch
  * 0001 keeps the LMS positions in that free space only where what it leaves
- * the recursion satisfies the same argument. The work array leaves at least
- * floor(n/2). libsais's malloc returns NULL here, so if that bound were ever
- * wrong a sort would fail with an internal error instead of allocating
- * behind the caller's bzalloc.
+ * the recursion satisfies the same argument, and patch 0003's recursion for
+ * repetitive blocks (sort_recursion.h) needs at each level only free space
+ * for the level's alphabet, which it has at every level given the free space
+ * libsais gives its own recursion (see that file). The work array
+ * leaves at least floor(n/2). libsais's malloc returns NULL here, so if that
+ * bound were ever wrong a sort would fail with an internal error instead of
+ * allocating behind the caller's bzalloc.
  */
 #include <limits.h>
 #include <stddef.h>
@@ -33,6 +38,44 @@
 #include <string.h>
 
 #include "sort.h"
+#include "sort_recursion.h"
+
+/*
+ * Entries of the reduced string whose LMS positions bzng_rec_repetitive
+ * counts: enough for a stable density, few enough to cost nothing next to
+ * the sort.
+ */
+#define BZNG_REC_SAMPLE 8192
+
+/*
+ * Whether the reduced string Tr[0..m) of a block, over names distinct names,
+ * goes to sort_recursion.h's recursion rather than libsais's (patch 0003).
+ * That recursion keeps each scan's bucket pointer in a register, which wins
+ * on strings as repetitive as CRAM's MC:Z tags and loses on text, binary and
+ * the other tag and quality data measured. What sets those blocks apart is a
+ * reduced string with few distinct names (at most 1 in 8 of its entries;
+ * MC:Z blocks have at most 0.11) whose own LMS positions are nearly as dense
+ * as they can be (more than 0.42 of its entries; at least 0.44 in every
+ * MC:Z block measured, at most 0.41 in every other block of the corpora,
+ * whose reduced strings mostly lie between 0.19 and 0.37). The density is
+ * taken over the first BZNG_REC_SAMPLE entries, the last of them counted as
+ * L-type. Decided from the block alone, so a block always takes the same
+ * path.
+ */
+static int
+bzng_rec_repetitive(const s32 *Tr, s32 m, s32 names)
+{
+	if ((s64)names * 8 > m)
+		return 0;
+	s32 len = m < BZNG_REC_SAMPLE ? m : BZNG_REC_SAMPLE;
+	s32 lms = 0, s1 = 0;
+	for (s32 i = len - 2; i >= 0; i--) {
+		s32 s0 = (Tr[i] < Tr[i + 1]) | ((Tr[i] == Tr[i + 1]) & s1);
+		lms += s1 & (s0 ^ 1);
+		s1 = s0;
+	}
+	return (s64)lms * 50 > (s64)len * 21;
+}
 
 /*
  * libsais's public functions, declared static before libsais.h declares
@@ -156,7 +199,7 @@ size_t
 bzng_bwt_work_ints(s32 n)
 {
 	/*
-	 * The suffix array, at least floor(n/2) of free space, and the
+	 * libsais's n entries, at least floor(n/2) of free space, and the
 	 * context's buckets.
 	 */
 	return (size_t)n + (size_t)n / 2 + SAIS_CTX_BUCKET_INTS;
@@ -183,8 +226,8 @@ bzng_bwt(const u8 *T, u8 *L, s32 n, s32 q, s32 *freq, s32 *work,
 	}
 
 	/*
-	 * The suffix array at the start of work, the context's buckets at its
-	 * end, and everything between them as libsais's free space, which
+	 * libsais's n entries at the start of work, the context's buckets at
+	 * its end, and everything between them as libsais's free space, which
 	 * satisfies the bound above; a single-thread context is no more than
 	 * its bucket counters.
 	 */
@@ -197,25 +240,28 @@ bzng_bwt(const u8 *T, u8 *L, s32 n, s32 q, s32 *freq, s32 *work,
 		.thread_state = NULL,
 		.threads = 1,
 	};
-	s32 *SA = work;
-	if (libsais_ctx(&ctx, T, SA, n, (s32)fs, freq) != 0)
+	/*
+	 * libsais's BWT mode with patch 0002: the final induction leaves in
+	 * each row's entry the byte before that row's suffix, stores the row of
+	 * suffix q in row and returns the row of suffix 0.
+	 */
+	s32 *A = work;
+	s32 row = -1;
+	s32 first = libsais_main_ctx(&ctx, T, A, n,
+				     LIBSAIS_FLAGS_BWT | LIBSAIS_FLAGS_BWT_ROW,
+				     q, &row, (s32)fs, freq);
+	if (first < 0 || row < 0)
 		return -2;
 	/* T is a Lyndon word exactly when suffix 0 is the least suffix. */
-	if (SA[0] != 0)
+	if (first != 0)
 		return -3;
 
 	/*
-	 * Suffix order is rotation order, so row i ends with the byte before
-	 * suffix SA[i]. The bytes go to the free space first, since L may be T.
+	 * Suffix order is rotation order, so row 0, suffix 0's, ends with
+	 * T[n - 1], and every other row's entry already holds its last byte.
+	 * The induction has finished with T, so L may be T.
 	 */
-	u8 *bwt = (u8 *)(SA + n);
-	s32 row = 0;
-	bwt[0] = T[n - 1];
-	for (s32 i = 1; i < n; i++) {
-		s32 s = SA[i];
-		bwt[i] = T[s - 1];
-		row = s == q ? i : row;
-	}
-	memcpy(L, bwt, (size_t)n);
+	L[0] = T[n - 1];
+	libsais_bwt_copy_8u(L + 1, A + 1, n - 1);
 	return row;
 }
