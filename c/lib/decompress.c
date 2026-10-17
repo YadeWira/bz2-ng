@@ -201,17 +201,33 @@ output(bzng_dstate *s, bz_stream *strm)
 			result = BZ_OK;
 			break;
 		}
-		const u8 x = *s->rd_ptr++;
-		s->rd_len--;
-		s->text_left--;
-		*out++ = x;
-		avail--;
-		if (s->ur_eq && x == s->ur_b) {
-			s->ur_eq++;
-		} else {
-			s->ur_b = x;
-			s->ur_eq = 1;
+		/*
+		 * Byte by byte to the end of the piece or of the output space,
+		 * or up to a run's fourth byte.  The state is copied into
+		 * locals for the loop: the byte stores may alias it, so the
+		 * compiler would otherwise load and store it for every byte.
+		 */
+		const u8 *const p = s->rd_ptr;
+		const u32 m = s->rd_len < avail ? s->rd_len : avail;
+		u32 b = s->ur_b, eq = s->ur_eq, i = 0;
+		while (i < m) {
+			const u8 x = p[i];
+			out[i++] = x;
+			if (eq && x == b) {
+				if (++eq == 4)
+					break;
+			} else {
+				b = x;
+				eq = 1;
+			}
 		}
+		out += i;
+		avail -= i;
+		s->rd_ptr = p + i;
+		s->rd_len -= i;
+		s->text_left -= i;
+		s->ur_b = (u8)b;
+		s->ur_eq = (u8)eq;
 		if (s->ur_eq == 4 && s->text_left == 0) {
 			/* four equal bytes end the block: the count is text
 			 * position n */

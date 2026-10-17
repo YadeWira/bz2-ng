@@ -184,9 +184,9 @@ typedef struct {
 /*
  * Bytes from next_out that get a fresh pattern before every call, and bytes
  * past the new next_out compared after it.  The bulk un-RLE1 kernel's stores
- * reach at most 15 bytes past what it delivers.
+ * reach at most 268 bytes past what it delivers.
  */
-#define OUT_WINDOW 256
+#define OUT_WINDOW 320
 
 static uint8_t *out_a, *out_b;
 static size_t out_buf_cap;

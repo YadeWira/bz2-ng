@@ -1235,20 +1235,31 @@ out:
  * candidate after a clean state is a true run start (an earlier equal byte
  * would have set an earlier one).
  *
- * The steps store whole vectors: the candidate step stores UNRLE_STEP bytes
- * and advances by fewer when it finds a run, and a run is filled in whole
- * vectors.  Bytes stored past out are always fewer than UNRLE_STEP, and any
- * later output of the block overwrites them, so the loop runs only while the
- * rest of the block is sure to produce that much: after a step at most
+ * The steps store whole words or vectors: the candidate step stores
+ * UNRLE_STEP bytes and advances by fewer when it finds a run, and a run is
+ * filled in whole vectors.  So a step may leave bytes stored past out, at most
+ * `stray` of them (UNRLE_STRAY, or UNRLE_WIDE_FILL in the wide stage), and
+ * the loop runs only while the rest of the block is sure to produce that
+ * much, so that its output overwrites them: after a step at most
  * UNRLE_STEP + 4 of the R text bytes counted at its start are used, and the
  * R' >= R - UNRLE_STEP - 4 bytes left decode to at least R' - (R' / 5 + 1)
  * bytes (at most one in five text bytes is a run's count byte), which is at
- * least UNRLE_STEP once R >= UNRLE_MIN_TEXT.  If the caller's buffer fills
- * first, the stores were inside it and are overwritten too.
+ * least `stray` once R >= UNRLE_MIN_TEXT(stray).  If the caller's buffer
+ * fills first, the stores were inside it and are overwritten too.
+ *
+ * The vector tiers start with a wide stage, which runs while the buffer and
+ * the block's text have room for the longest run in whole vectors and fills
+ * every run with that many: a loop or a branch on the run's length would
+ * mispredict on most runs of run-dense text, and the fixed stores cost less.
  */
 #if VEC_ENABLED
-#  define UNRLE_STEP  16
+#  define UNRLE_STEP  ((u32)sizeof(vec_t))
 #  define UNRLE_SHIFT VEC_SHIFT
+/* Bytes a narrow step may leave stored past out: unrle_fill's two vectors. */
+#  define UNRLE_STRAY (2 * UNRLE_STEP)
+/* The longest run, 4 + 255 bytes, rounded up to whole vectors. */
+#  define UNRLE_WIDE_FILL \
+	  ((4u + 255u + UNRLE_STEP - 1) / UNRLE_STEP * UNRLE_STEP)
 /* Candidate mask of in[0..UNRLE_STEP), storing those bytes to out. */
 static inline u64
 unrle_candidates(const u8 *in, u8 *out)
@@ -1259,17 +1270,41 @@ unrle_candidates(const u8 *in, u8 *out)
 	return vec_mask(vec_and(vec_and(vec_eq(v0, v1), vec_eq(v0, v2)),
 				vec_eq(v0, v3)));
 }
-/* Writes total copies of c to out, which has room for total + 16 bytes. */
+/*
+ * Writes total (4..259) copies of c to out, which has room for
+ * max(total, UNRLE_STRAY) bytes: two vectors, then for a longer run whole
+ * vectors up to one that ends at out + total.
+ */
 static inline void
 unrle_fill(u8 *out, u8 c, u32 total)
 {
 	const vec_t cv = vec_dup(c);
-	for (u32 j = 0; j < total; j += 16)
+	vec_st(out, cv);
+	vec_st(out + UNRLE_STEP, cv);
+	if (total > 2 * UNRLE_STEP) {
+		for (u32 j = 2 * UNRLE_STEP; j + UNRLE_STEP < total;
+		     j += UNRLE_STEP)
+			vec_st(out + j, cv);
+		vec_st(out + total - UNRLE_STEP, cv);
+	}
+}
+/*
+ * Writes UNRLE_WIDE_FILL copies of c to out, enough for any run, whatever the
+ * run's length.
+ */
+static inline void
+unrle_fill_wide(u8 *out, u8 c)
+{
+	const vec_t cv = vec_dup(c);
+	UNROLL_FULL
+	for (u32 j = 0; j < UNRLE_WIDE_FILL; j += UNRLE_STEP)
 		vec_st(out + j, cv);
 }
 #else
-#  define UNRLE_STEP  8
+#  define UNRLE_STEP  8u
 #  define UNRLE_SHIFT 3
+/* The candidate store's bytes; the run fill writes exactly total bytes. */
+#  define UNRLE_STRAY UNRLE_STEP
 static inline u64
 unrle_candidates(const u8 *in, u8 *out)
 {
@@ -1288,11 +1323,24 @@ unrle_fill(u8 *out, u8 c, u32 total)
 #endif
 
 /*
- * Remaining block text that guarantees UNRLE_STEP more output bytes after one
- * more step: R' - (R' / 5 + 1) >= UNRLE_STEP needs
- * R' >= 5 * UNRLE_STEP / 4 + 2, and R = R' + UNRLE_STEP + 4.
+ * Remaining block text that guarantees `stray` more output bytes after one
+ * more step: R' - (R' / 5 + 1) >= stray needs R' >= 5 * stray / 4 + 2, and
+ * R = R' + UNRLE_STEP + 4.
  */
-#define UNRLE_MIN_TEXT (UNRLE_STEP + 4 + (5 * UNRLE_STEP + 3) / 4 + 2)
+#define UNRLE_MIN_TEXT(stray) (UNRLE_STEP + 4 + (5 * (stray) + 3) / 4 + 2)
+
+/*
+ * The least in_len at which a step may run, given the text after the piece:
+ * a step reads in[0..UNRLE_STEP + 4), and the piece and the text after it
+ * must hold min_text bytes.
+ */
+static inline u32
+unrle_floor(u32 text_after, u32 min_text)
+{
+	return text_after >= min_text - (UNRLE_STEP + 4) ?
+		       UNRLE_STEP + 4 :
+		       min_text - text_after;
+}
 
 void
 ADD_SUFFIX(bzng_unrle)(bzng_unrle_io *io)
@@ -1301,10 +1349,32 @@ ADD_SUFFIX(bzng_unrle)(bzng_unrle_io *io)
 	u32 plen = io->in_len;
 	u8 *out = io->out;
 	u32 avail = io->avail;
-	const u32 text_after = io->text_after;
 	const u8 *lit = p;
-	while (plen >= UNRLE_STEP + 4 && avail >= UNRLE_STEP &&
-	       plen + text_after >= UNRLE_MIN_TEXT) {
+	u32 min_len;
+#if VEC_ENABLED
+	min_len = unrle_floor(io->text_after, UNRLE_MIN_TEXT(UNRLE_WIDE_FILL));
+	while (plen >= min_len && avail >= UNRLE_STEP + UNRLE_WIDE_FILL) {
+		const u64 bits = unrle_candidates(p, out);
+		if (bits == 0) {
+			p += UNRLE_STEP;
+			out += UNRLE_STEP;
+			plen -= UNRLE_STEP;
+			avail -= UNRLE_STEP;
+			continue;
+		}
+		const u32 k = bsf64(bits) >> UNRLE_SHIFT;
+		const u8 c = p[k];
+		const u32 total = 4u + p[k + 4];
+		p += k + 5;
+		plen -= k + 5;
+		lit = p;
+		unrle_fill_wide(out + k, c);
+		out += k + total;
+		avail -= k + total;
+	}
+#endif
+	min_len = unrle_floor(io->text_after, UNRLE_MIN_TEXT(UNRLE_STRAY));
+	while (plen >= min_len && avail >= UNRLE_STEP) {
 		const u64 bits = unrle_candidates(p, out);
 		if (bits == 0) {
 			p += UNRLE_STEP;
@@ -1323,7 +1393,7 @@ ADD_SUFFIX(bzng_unrle)(bzng_unrle_io *io)
 		p += 5;
 		plen -= 5;
 		lit = p;
-		if (avail >= total + 16) {
+		if (avail >= total + UNRLE_STRAY) {
 			unrle_fill(out, c, total);
 			out += total;
 			avail -= total;
@@ -1356,4 +1426,6 @@ ADD_SUFFIX(bzng_unrle)(bzng_unrle_io *io)
 
 #undef UNRLE_STEP
 #undef UNRLE_SHIFT
+#undef UNRLE_STRAY
+#undef UNRLE_WIDE_FILL
 #undef UNRLE_MIN_TEXT

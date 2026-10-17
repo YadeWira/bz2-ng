@@ -229,10 +229,11 @@ enum {
  *
  * The kernel never leaves a byte of the caller's buffer modified beyond what
  * the decoder delivers, which libbz2 does only in the call that reports a
- * corrupt block (output() in decompress.c): its whole-vector stores may run
- * a few bytes past io->out, and it uses them only while the rest of the
- * block is long enough that its output will overwrite them (or the caller's
- * buffer fills up first); see kern_template.h.
+ * corrupt block (output() in decompress.c): its whole-vector stores stay
+ * inside out[0..avail) but may run past io->out, by up to the longest run in
+ * whole vectors, and it uses them only while the rest of the block is long
+ * enough that its output will overwrite them (or the caller's buffer fills up
+ * first); see kern_template.h.
  */
 typedef struct bzng_unrle_io {
 	const u8 *in;

@@ -94,41 +94,52 @@ bzng_build_htable(bzng_htable *t, const u8 *length, s32 alpha_size)
 }
 
 /*
- * Per-quarter symbol counts of L[0..n): quarters [0,q), [q,2q), [2q,3q),
- * [3q,n) with q = n/4, counted in one interleaved pass so the four counter
- * chains run in parallel.
+ * The table build splits L into BUILD_PARTS parts of q = n / BUILD_PARTS rows,
+ * the last part also taking the n % BUILD_PARTS rows after them, and counts
+ * and scatters them interleaved, each part with counters and cursors of its
+ * own: L is mostly runs of one symbol, so one part's updates form a chain of
+ * dependent loads and stores, and the parts' chains run in parallel.
  */
+#define BUILD_PARTS 8
+
+/* Repeats X(k) for parts 0..7. */
+#define PARTS_8(X) X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7)
+
+/* Counts row i of part k. */
+#define PART_COUNT(k) h[k][L[i + (k) * q]]++;
+
+/* Per-part symbol counts of L[0..n), in one interleaved pass. */
 static void
-quarter_hist(const u8 *L, u32 n, u32 h[4][256])
+part_hist(const u8 *L, u32 n, u32 h[BUILD_PARTS][256])
 {
-	memset(h, 0, 4 * 256 * sizeof(u32));
-	const u32 q = n / 4;
+	/* PARTS_8, PARTS_LO and PARTS_HI name the parts by number. */
+	STATIC_ASSERT(BUILD_PARTS == 8);
+	memset(h, 0, BUILD_PARTS * 256 * sizeof(u32));
+	const u32 q = n / BUILD_PARTS;
 	for (u32 i = 0; i < q; i++) {
-		h[0][L[i]]++;
-		h[1][L[i + q]]++;
-		h[2][L[i + 2 * q]]++;
-		h[3][L[i + 3 * q]]++;
+		PARTS_8(PART_COUNT)
 	}
-	for (u32 i = 4 * q; i < n; i++)
-		h[3][L[i]]++;
+	for (u32 i = BUILD_PARTS * q; i < n; i++)
+		h[BUILD_PARTS - 1][L[i]]++;
 }
 
 /*
- * Fills cftab (exclusive prefix sums, cftab[256] == n) and the per-quarter
- * scatter cursors from the quarter histograms.
+ * Fills cftab (exclusive prefix sums, cftab[256] == n) from the per-part
+ * counts and turns the counts into the parts' scatter cursors in place: part
+ * k's rows of symbol c go to [h[k][c], h[k + 1][c]), and the last part's end
+ * at cftab[c + 1].
  */
 static void
-cursors(bzng_dstate *s, u32 h[4][256], u32 cf[4][256])
+cursors(bzng_dstate *s, u32 h[BUILD_PARTS][256])
 {
 	u32 sum = 0;
 	for (int c = 0; c < 256; c++) {
 		s->cftab[c] = sum;
-		u32 at = sum;
-		for (int k = 0; k < 4; k++) {
-			cf[k][c] = at;
-			at += h[k][c];
+		for (int k = 0; k < BUILD_PARTS; k++) {
+			const u32 count = h[k][c];
+			h[k][c] = sum;
+			sum += count;
 		}
-		sum = at;
 	}
 	s->cftab[256] = sum;
 }
@@ -245,47 +256,66 @@ load3(const u8 *p3, u32 j)
 }
 
 /*
- * Builds the T table from L (T(LF(i)) = i), four quarters with independent
- * cursors. fit: 3-byte entries holding the 20-bit pointer; otherwise 4-byte
+ * The scatter takes the parts four at a time, parts 0-3 and then 4-7, every
+ * part named by a constant: reached through a run-time part offset, gcc
+ * stores some cursors before their entries, which is slower.
+ */
+#define PARTS_LO(X) X(0) X(1) X(2) X(3)
+#define PARTS_HI(X) X(4) X(5) X(6) X(7)
+/* Row i of part k in the scatter: its symbol c##k, cursor j##k and row. */
+#define PART_SYM(k) const u32 c##k = L[i + (k) * q];
+#define PART_CUR(k) const u32 j##k = cf[k][c##k];
+#define PART_ROW(k) (i + (k) * q)
+#define PART_STORE(k)                       \
+	tt[j##k] = PART_ROW(k) << 8 | c##k; \
+	cf[k][c##k] = j##k + 1;
+#define PART_PUT(k)  tt[cf[k][c##k]++] = PART_ROW(k) << 8 | c##k;
+#define PART_PUT3(k) store3w(p3, cf[k][L[i + (k) * q]]++, PART_ROW(k));
+
+/*
+ * Builds the T table from L (T(LF(i)) = i), BUILD_PARTS parts with cursors of
+ * their own. fit: 3-byte entries holding the 20-bit pointer; otherwise 4-byte
  * entries i << 8 | L[i] (the symbol is F of the row being indexed).
  */
 static void
 build_t(bzng_dstate *s, u32 n, int fit)
 {
-	u32 h[4][256], cf[4][256];
+	u32 cf[BUILD_PARTS][256];
 	const u8 *L = s->L;
-	quarter_hist(L, n, h);
-	cursors(s, h, cf);
-	const u32 q = n / 4;
+	part_hist(L, n, cf);
+	cursors(s, cf);
+	const u32 q = n / BUILD_PARTS;
 	if (fit) {
 		/*
 		 * One 4-byte store per entry: it also zeroes the low byte of
-		 * the next entry, which within a (quarter, symbol) cursor range
+		 * the next entry, which within a (part, symbol) cursor range
 		 * is written later anyway; the first entry of each range is
 		 * repaired below.
 		 */
 		u8 *p3 = s->tbl;
-		u32 start[4][256];
-		memcpy(start, cf, sizeof start);
 		for (u32 i = 0; i < q; i++) {
-			store3w(p3, cf[0][L[i]]++, i);
-			store3w(p3, cf[1][L[i + q]]++, i + q);
-			store3w(p3, cf[2][L[i + 2 * q]]++, i + 2 * q);
-			store3w(p3, cf[3][L[i + 3 * q]]++, i + 3 * q);
+			PARTS_LO(PART_PUT3)
 		}
-		for (u32 i = 4 * q; i < n; i++)
-			store3w(p3, cf[3][L[i]]++, i);
+		for (u32 i = 0; i < q; i++) {
+			PARTS_HI(PART_PUT3)
+		}
+		for (u32 i = BUILD_PARTS * q; i < n; i++)
+			store3w(p3, cf[BUILD_PARTS - 1][L[i]]++, i);
 		/*
-		 * A range's first entry holds the first i of its quarter with
+		 * A range's first entry holds the first i of its part with
 		 * that symbol; bits 8-19 survived, so the low byte is found by
-		 * a scan of at most 256 symbols.
+		 * a scan of at most 256 symbols.  Part k's range for c starts
+		 * where part k - 1's cursor for c ended, and is empty if part
+		 * k's cursor ends there too.
 		 */
-		for (int k = 0; k < 4; k++) {
+		for (int k = 0; k < BUILD_PARTS; k++) {
 			const u32 q_lo = (u32)k * q;
 			for (int c = 0; c < 256; c++) {
-				if (h[k][c] == 0)
+				const u32 first =
+					k ? cf[k - 1][c] : s->cftab[c];
+				if (cf[k][c] == first)
 					continue;
-				u8 *e = p3 + 3 * (size_t)start[k][c];
+				u8 *e = p3 + 3 * (size_t)first;
 				u32 i = ((u32)e[1] | (u32)e[2] << 8) << 8;
 				if (i < q_lo)
 					i = q_lo;
@@ -297,40 +327,38 @@ build_t(bzng_dstate *s, u32 n, int fit)
 	} else {
 		u32 *tt = (u32 *)(void *)s->tbl;
 		/*
-		 * Each quarter has its own cursors, so all four cursors of an
+		 * Each part has its own cursors, so all the cursors of an
 		 * iteration are loaded before any entry is stored, and each
 		 * entry is then stored before its cursor: with clang that order
-		 * decodes repetitive data about 15% faster on Granite Rapids.
-		 * The cursors never escape, so the compiler may reorder these
-		 * accesses; clang keeps the order written here. gcc keeps the
-		 * post-increment, which it compiles to tighter code that does
-		 * not need the order.
+		 * decodes repetitive data markedly faster on Granite Rapids
+		 * (spec D7 has the measurement). The cursors never escape, so
+		 * the compiler may reorder these accesses; clang keeps the
+		 * order written here. gcc gets the post-increment form, which
+		 * it compiles to tighter code that still stores each entry
+		 * before its cursor as long as every part is named by a
+		 * constant.
 		 */
 		for (u32 i = 0; i < q; i++) {
-			const u32 c0 = L[i], c1 = L[i + q], c2 = L[i + 2 * q],
-				  c3 = L[i + 3 * q];
+			PARTS_LO(PART_SYM)
 #if GCC_PREREQ(1, 0)
-			tt[cf[0][c0]++] = i << 8 | c0;
-			tt[cf[1][c1]++] = (i + q) << 8 | c1;
-			tt[cf[2][c2]++] = (i + 2 * q) << 8 | c2;
-			tt[cf[3][c3]++] = (i + 3 * q) << 8 | c3;
+			PARTS_LO(PART_PUT)
 #else
-			const u32 j0 = cf[0][c0], j1 = cf[1][c1],
-				  j2 = cf[2][c2], j3 = cf[3][c3];
-
-			tt[j0] = i << 8 | c0;
-			cf[0][c0] = j0 + 1;
-			tt[j1] = (i + q) << 8 | c1;
-			cf[1][c1] = j1 + 1;
-			tt[j2] = (i + 2 * q) << 8 | c2;
-			cf[2][c2] = j2 + 1;
-			tt[j3] = (i + 3 * q) << 8 | c3;
-			cf[3][c3] = j3 + 1;
+			PARTS_LO(PART_CUR)
+			PARTS_LO(PART_STORE)
 #endif
 		}
-		for (u32 i = 4 * q; i < n; i++) {
+		for (u32 i = 0; i < q; i++) {
+			PARTS_HI(PART_SYM)
+#if GCC_PREREQ(1, 0)
+			PARTS_HI(PART_PUT)
+#else
+			PARTS_HI(PART_CUR)
+			PARTS_HI(PART_STORE)
+#endif
+		}
+		for (u32 i = BUILD_PARTS * q; i < n; i++) {
 			const u32 c = L[i];
-			tt[cf[3][c]++] = i << 8 | c;
+			tt[cf[BUILD_PARTS - 1][c]++] = i << 8 | c;
 		}
 	}
 }
@@ -728,9 +756,9 @@ bzng_finish_block(bzng_dstate *s)
 		 * overwrites symbols already used; then libbz2's pointer
 		 * reversal turns the cycle through origPtr into T.
 		 */
-		u32 h[4][256], cf[4][256], cend[256];
-		quarter_hist(s->L, n, h);
-		cursors(s, h, cf);
+		u32 h[BUILD_PARTS][256], cend[256];
+		part_hist(s->L, n, h);
+		cursors(s, h);
 		for (int c = 0; c < 256; c++)
 			cend[c] = s->cftab[c + 1];
 		for (u32 i = n; i-- > 0;) {
