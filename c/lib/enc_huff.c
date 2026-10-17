@@ -12,10 +12,11 @@
  * transmitted are those of the last iteration and the lengths those rebuilt
  * after it, so the output is libbz2's bit for bit.
  *
- * hb_assign_codes is libbzip2 1.0.8's BZ2_hbAssignCodes (huffman.c);
- * hb_make_code_lengths and its helpers are its BZ2_hbMakeCodeLengths, with
- * the same heap, tie-breaking and merges, restructured to build several
- * tables side by side; seed_tables and selector_mtf follow compress.c.
+ * hb_make_code_lengths and its helpers are libbzip2 1.0.8's
+ * BZ2_hbMakeCodeLengths (huffman.c), with the same heap, tie-breaking and
+ * merges, restructured to build several tables side by side; assign_codes
+ * gives the codes of its BZ2_hbAssignCodes by another route; seed_tables
+ * and selector_mtf follow compress.c.
  * libbzip2 is Copyright (C) 1996-2019 Julian Seward, under the licence in
  * licenses/bzip2-1.0.8.txt. ALTERED for bz2-ng: this is not the original
  * software; names and types are changed and the rest of the stage is
@@ -223,16 +224,58 @@ hb_make_code_lengths(bzng_huff_scratch *h, s32 (*freq)[BZ_MAX_ALPHA_SIZE],
 	}
 }
 
+/*
+ * The canonical codes of libbz2's BZ2_hbAssignCodes (shorter codes first,
+ * the symbols of one length in symbol order) for the code lengths
+ * len[0..alphaSize), as ce[i] = code << 5 | len[i]. Its pass over the
+ * alphabet for each length gives the codes of length n the values from
+ * next[n] on, where next[n + 1] = (next[n] + count[n]) << 1; so one pass
+ * counts the lengths and one hands out the codes. Lengths are 1 to
+ * BZNG_MAX_CODE_LEN, which hb_make_code_lengths guarantees; put_lengths
+ * relies on the same bound.
+ */
 static void
-hb_assign_codes(s32 *code, const u8 *length, s32 minLen, s32 maxLen,
-		s32 alphaSize)
+assign_codes(u32 *ce, const u8 *len, s32 alphaSize)
 {
-	s32 vec = 0;
-	for (s32 n = minLen; n <= maxLen; n++) {
-		for (s32 i = 0; i < alphaSize; i++)
-			if (length[i] == n)
-				code[i] = vec++;
-		vec <<= 1;
+	u32 count[BZNG_MAX_CODE_LEN + 1] = {0};
+	u32 next[BZNG_MAX_CODE_LEN + 2] = {0};
+
+	for (s32 i = 0; i < alphaSize; i++) {
+		ASSERT(len[i] >= 1 && len[i] <= BZNG_MAX_CODE_LEN);
+		count[len[i]]++;
+	}
+	for (int n = 1; n <= BZNG_MAX_CODE_LEN; n++)
+		next[n + 1] = (next[n] + count[n]) << 1;
+	for (s32 i = 0; i < alphaSize; i++)
+		ce[i] = next[len[i]]++ << 5 | len[i];
+}
+
+/*
+ * A table's code lengths as bzip2 sends them: the first in 5 bits, then for
+ * each symbol the steps from the previous length (10 up, 11 down) and a 0.
+ * Each symbol's bits go out in one write, two for a change of 16 (from 1 to
+ * 17 or back), whose 33 bits exceed one bzng_bw_put.
+ */
+static void
+put_lengths(bzng_bitwriter *bw, const u8 *len, s32 alphaSize)
+{
+	u32 curr = len[0];
+
+	bzng_bw_put(bw, 5, curr);
+	for (s32 i = 0; i < alphaSize; i++) {
+		u32 target = len[i];
+		int up = target > curr;
+		u32 k = up ? target - curr : curr - target;
+
+		if (unlikely(k > 15)) {
+			bzng_bw_put(bw, 2, up ? 2 : 3);
+			k--;
+		}
+		u32 steps = (1u << (2 * k)) - 1;
+		if (up)
+			steps &= 0xaaaaaaaa;
+		bzng_bw_put(bw, 2 * k + 1, (u64)steps << 1);
+		curr = target;
 	}
 }
 
@@ -317,6 +360,8 @@ selector_mtf(const u8 *selector, s32 nSelectors, s32 nGroups, u8 *selectorMtf)
  *   runs of the same MTF value;
  * - a table that no group moved into or out of keeps its code lengths: they
  *   are a function of its counts alone, so rebuilding it would give the same;
+ * - canonical codes from the count of each code length (assign_codes), and
+ *   each symbol's code-length steps in one write (put_lengths);
  * - emission through a 64-bit accumulator with one (code << 5 | len) lookup
  *   per symbol and one flush per three symbols (7 + 3 * 17 <= 63 bits).
  */
@@ -413,19 +458,8 @@ bzng_huff_encode(bzng_huff_scratch *h, const u16 *mtfv, s32 nMTF,
 	}
 
 	selector_mtf(selector, nSelectors, nGroups, selectorMtf);
-	s32 code[BZ_MAX_ALPHA_SIZE];
-	for (s32 t = 0; t < nGroups; t++) {
-		s32 minLen = 32, maxLen = 0;
-		for (s32 i = 0; i < alphaSize; i++) {
-			if (len[t][i] > maxLen)
-				maxLen = len[t][i];
-			if (len[t][i] < minLen)
-				minLen = len[t][i];
-		}
-		hb_assign_codes(code, &len[t][0], minLen, maxLen, alphaSize);
-		for (s32 i = 0; i < alphaSize; i++)
-			ce[t][i] = ((u32)code[i] << 5) | len[t][i];
-	}
+	for (s32 t = 0; t < nGroups; t++)
+		assign_codes(ce[t], len[t], alphaSize);
 
 	bzng_bw_put(bw, 3, (u64)nGroups);
 	bzng_bw_put(bw, 15, (u64)nSelectors);
@@ -433,22 +467,8 @@ bzng_huff_encode(bzng_huff_scratch *h, const u16 *mtfv, s32 nMTF,
 		u32 j = selectorMtf[i]; /* j ones then a zero */
 		bzng_bw_put(bw, j + 1, ((1u << j) - 1) << 1);
 	}
-	for (s32 t = 0; t < nGroups; t++) {
-		s32 curr = len[t][0];
-		bzng_bw_put(bw, 5, (u64)curr);
-		for (s32 i = 0; i < alphaSize; i++) {
-			s32 target = len[t][i];
-			while (curr < target) {
-				bzng_bw_put(bw, 2, 2);
-				curr++;
-			}
-			while (curr > target) {
-				bzng_bw_put(bw, 2, 3);
-				curr--;
-			}
-			bzng_bw_put(bw, 1, 0);
-		}
-	}
+	for (s32 t = 0; t < nGroups; t++)
+		put_lengths(bw, len[t], alphaSize);
 
 	/*
 	 * Coded MTF values: three symbols per flush, which needs <= 7 bits

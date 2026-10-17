@@ -31,6 +31,74 @@
 #include "enc.h"
 #include "vec.h"
 
+/* ---- encoder: change masks ----------------------------------------------- */
+
+/*
+ * Bit k set iff p[k] != p[k-1], k = 0..63 (reads p[-1..64)).  MTF visits the
+ * positions where the BWT changes; the RLE1 input stage reads the mask one
+ * byte on, as the positions that differ from their successor.
+ */
+#if VEC_X86
+static inline u64
+change_mask64(const u8 *p)
+{
+#  if defined(__AVX2__)
+	u64 lo = (u32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(
+		_mm256_loadu_si256((const __m256i *)p),
+		_mm256_loadu_si256((const __m256i *)(p - 1))));
+	u64 hi = (u32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(
+		_mm256_loadu_si256((const __m256i *)(p + 32)),
+		_mm256_loadu_si256((const __m256i *)(p + 31))));
+	return ~(lo | hi << 32);
+#  else
+	u64 m = 0;
+	for (int k = 0; k < 4; k++)
+		m |= vec_mask(
+			     vec_eq(vec_ld(p + 16 * k), vec_ld(p + 16 * k - 1)))
+		     << (16 * k);
+	return ~m;
+#  endif
+}
+#elif VEC_NEON
+static inline u64
+change_mask64(const u8 *p)
+{
+	static const u8 bits[16] = {1, 2, 4, 8, 16, 32, 64, 128,
+				    1, 2, 4, 8, 16, 32, 64, 128};
+	uint8x16_t w = vld1q_u8(bits);
+	uint8x16_t e0 = vandq_u8(vceqq_u8(vld1q_u8(p), vld1q_u8(p - 1)), w);
+	uint8x16_t e1 =
+		vandq_u8(vceqq_u8(vld1q_u8(p + 16), vld1q_u8(p + 15)), w);
+	uint8x16_t e2 =
+		vandq_u8(vceqq_u8(vld1q_u8(p + 32), vld1q_u8(p + 31)), w);
+	uint8x16_t e3 =
+		vandq_u8(vceqq_u8(vld1q_u8(p + 48), vld1q_u8(p + 47)), w);
+	uint8x16_t s = vpaddq_u8(vpaddq_u8(e0, e1), vpaddq_u8(e2, e3));
+	s = vpaddq_u8(s, s);
+	return ~vgetq_lane_u64(vreinterpretq_u64_u8(s), 0);
+}
+#else
+static inline u64
+change_mask64(const u8 *p)
+{
+	const u64 lo7 = 0x7f7f7f7f7f7f7f7f;
+	u64 m = 0;
+
+	for (int k = 0; k < 8; k++) {
+		u64 x = load_u64_unaligned(p + 8 * k) ^
+			load_u64_unaligned(p + 8 * k - 1);
+		/* 0x80 in each nonzero byte, exactly; byte j at bits 8j.. */
+		u64 nz = le64_bswap((((x & lo7) + lo7) | x) & ~lo7);
+		/*
+		 * Bit 8j to bit 56 + j: the product's terms land on distinct
+		 * bits, so nothing carries into the top byte.
+		 */
+		m |= ((nz >> 7) * 0x0102040810204080ULL) >> 56 << (8 * k);
+	}
+	return m;
+}
+#endif
+
 /* ---- encoder: RLE1 input stage ------------------------------------------- */
 
 /*
@@ -42,8 +110,9 @@
  * in from the previous call (whose bytes are no longer available, so they
  * are added as len copies of its byte).
  *
- * Per tier: run4_mask (which of RUN4_STEP positions start four equal
- * bytes), copy_step (copies RUN4_STEP bytes) and run_length.
+ * Per tier: change_mask64 (above) for the window phase; run4_mask (which of
+ * RUN4_STEP positions start four equal bytes), copy_step (copies RUN4_STEP
+ * bytes) and run_length for the step phase.
  */
 #if VEC_X86 && defined(__AVX2__)
 /* Bit k is set iff p[k..k+4) are equal (k = 0..31); reads p[0..35). */
@@ -159,12 +228,106 @@ run_length(const u8 *p, size_t avail, u8 c)
 /* ---- block filling ------------------------------------------------------- */
 
 /*
- * The fast phase keeps the block this far below nblock_max, so the exact
+ * The fast phases keep the block this far below nblock_max, so the exact
  * unit-by-unit tail makes every block-full decision.
  */
 #define RLE_GUARD 8
 /* Calls with fewer input bytes than this take the byte loop. */
 #define SMALL_CHUNK 16
+/* Input the window phase reads from a window's start: its mask and the next. */
+#define RLE_LOOKAHEAD 129
+
+/*
+ * Copies at least n bytes from src to dst in whole steps: up to
+ * RUN4_STEP - 1 bytes past n, and RUN4_STEP when n is 0.
+ */
+static inline void
+copy_literals(u8 *dst, const u8 *src, size_t n)
+{
+	copy_step(dst, src);
+	for (size_t q = RUN4_STEP; q < n; q += RUN4_STEP)
+		copy_step(dst + q, src + q);
+}
+
+/*
+ * Window phase: from the unit boundary p with the block at *nbp, the runs of
+ * 64-byte windows from their change masks.  In a window's mask d (bit k:
+ * in[k] != in[k + 1]), a run of four or more starts at k when bits k, k + 1
+ * and k + 2 are clear and ends at the next set bit, so successive runs come
+ * from bit scans with no load between them; each mask is computed once, as
+ * the lookahead of the window before.  Literal bytes are copied when a run
+ * or the window's end comes, which may write RUN4_STEP bytes past limit.  It
+ * stops at a unit boundary, or between windows inside a literal unit of <= 3
+ * bytes that ends within this call (which writes the same bytes however it
+ * is split), with the block at most at limit; it returns where it stopped,
+ * every byte before which is in the block.
+ */
+static inline size_t
+rle_windows(const u8 *in, size_t avail, size_t p, u8 *blk, s32 *nbp, s32 limit)
+{
+	s32 nb = *nbp;
+	/*
+	 * in[lit..) is not yet in the block; with in_run set it starts a run
+	 * of four or more whose end has not been reached.
+	 */
+	size_t lit = p, base = p;
+	int in_run = 0;
+
+	if (avail - p < RLE_LOOKAHEAD)
+		return p;
+	u64 d = change_mask64(in + base + 1), dn;
+	for (; avail - base >= RLE_LOOKAHEAD; base += 64, d = dn) {
+		dn = change_mask64(in + base + 65);
+		u64 r4 = ~(d | (d >> 1 | dn << 63) | (d >> 2 | dn << 62));
+		u64 ends = d;
+		for (;;) {
+			if (in_run) {
+				if (ends == 0)
+					break; /* it goes on past this window */
+				u32 e = bsf64(ends);
+				size_t len = base + e + 1 - lit;
+				u8 c = in[lit];
+				while (len >= 255) {
+					if (nb + 5 > limit)
+						goto stop;
+					nb = bzng_put_unit(blk, nb, c, 255);
+					lit += 255;
+					len -= 255;
+				}
+				if (len > 0) {
+					if (nb + 5 > limit)
+						goto stop;
+					nb = bzng_put_unit(blk, nb, c,
+							   (s32)len);
+					lit += len;
+				}
+				in_run = 0;
+				r4 &= ~(u64)1 << e;
+			}
+			if (r4 == 0)
+				break;
+			u32 k = bsf64(r4);
+			size_t j = base + k;
+			if (nb + (s32)(j - lit) > limit)
+				goto stop;
+			copy_literals(blk + nb, in + lit, j - lit);
+			nb += (s32)(j - lit);
+			lit = j;
+			ends = d & (~(u64)0 << k);
+			in_run = 1;
+		}
+		if (!in_run) {
+			if (nb + (s32)(base + 64 - lit) > limit)
+				goto stop;
+			copy_literals(blk + nb, in + lit, base + 64 - lit);
+			nb += (s32)(base + 64 - lit);
+			lit = base + 64;
+		}
+	}
+stop:
+	*nbp = nb;
+	return lit;
+}
 
 size_t
 ADD_SUFFIX(bzng_rle_fill)(bzng_rle_state *st, const u8 *in, size_t avail,
@@ -243,11 +406,17 @@ ADD_SUFFIX(bzng_rle_fill)(bzng_rle_state *st, const u8 *in, size_t avail,
 	const size_t u = p;
 	const s32 limit = nblock_max - RLE_GUARD;
 
+	p = rle_windows(in, avail, p, blk, &nb, limit);
+
 	/*
-	 * Fast phase: whole literal spans and runs while the block has room for
-	 * a whole step and the input for the loads. It stops only at a unit
-	 * boundary or inside a literal unit of <= 3 bytes that ends within this
-	 * call (which writes the same bytes however it is split).
+	 * Step phase, from wherever the window phase stopped (inside a run that
+	 * outlasts its last window, at the block limit, or at the last
+	 * RLE_LOOKAHEAD bytes it cannot read ahead of): whole literal spans and
+	 * runs while the block has room for a whole step and the input for the
+	 * loads. It stops only at a
+	 * unit boundary or inside a literal unit of <= 3 bytes that ends within
+	 * this call (which writes the same bytes however it is split), so it
+	 * may start where the window phase stopped.
 	 */
 	while (nb + RUN4_STEP <= limit && p + 2 * RUN4_STEP <= avail) {
 		u64 m = run4_mask(in + p);
@@ -320,23 +489,15 @@ tail:
  * sequence numbers.
  * - Rank 0 is exactly L[i] == L[i-1], so only positions where the byte
  *   changes are visited (64-position change masks, vector tiers).
- * - List positions 0..7 live in one 64-bit register (head): ranks 1-7 are a
- *   SWAR byte search and a bit-select update.
- * - Positions 8..255 live in a 16-byte-aligned array (tail), searched and
+ * - List positions 0..7 and 8..15 live in two 64-bit registers (head,
+ *   head1): ranks 1-15 are a SWAR byte search and a bit-select update, so
+ *   the common ranks never touch memory.
+ * - Positions 16..255 live in a 16-byte-aligned array (tail), searched and
  *   shifted in one pass, 16 bytes at a time (vector) or 8 (scalar).
  * - Zero runs: the RUNA/RUNB digits of a run of z are the bits of z + 1
  *   below its leading one, least significant first, written with one
  *   unconditional store and counted with a popcount.
  */
-
-/*
- * The MTF list: entries 0..7 in head (entry 0 in the low byte), 8..255 in
- * tail.
- */
-typedef struct {
-	u64 head;
-	_Alignas(16) u8 tail[256];
-} mtf_list;
 
 /*
  * Writes the digits of a zero run of length z >= 0 at mtfv[wr]; returns the
@@ -389,16 +550,16 @@ put_zero_run(u16 *mtfv, s32 wr, s32 *mtf_freq, u32 z)
 }
 
 /*
- * Moves byte c (known to be at list position >= 8) to the front; returns its
- * rank.
+ * Takes byte c out of the tail (list positions 16..255): the entries before
+ * it move one position on and carry, the entry leaving position 15, takes
+ * position 16.  Returns c's rank.
  */
 static inline s32
-tail_move_to_front(mtf_list *lst, u8 c)
+tail_move_to_front(u8 *tail, u8 carry, u8 c)
 {
-	u8 *tail = lst->tail;
 	s32 r;
 #if VEC_ENABLED
-	vec_t vc = vec_dup(c), prev = vec_dup((u8)(lst->head >> 56));
+	vec_t vc = vec_dup(c), prev = vec_dup(carry);
 	for (s32 k = 0;; k++) {
 		vec_t cur = vec_ld(tail + 16 * k);
 		vec_t shifted = vec_shift1(prev, cur);
@@ -407,98 +568,84 @@ tail_move_to_front(mtf_list *lst, u8 c)
 			s32 lane = (s32)(bsf64(m) >> VEC_SHIFT);
 			vec_st(tail + 16 * k,
 			       vec_sel_upto((unsigned)lane, shifted, cur));
-			r = 8 + 16 * k + lane;
+			r = 16 + 16 * k + lane;
 			break;
 		}
 		vec_st(tail + 16 * k, shifted);
 		prev = cur;
 	}
 #else
-	u64 vc = 0x0101010101010101ULL * c, carry = lst->head >> 56;
+	u64 vc = 0x0101010101010101ULL * c, in = carry;
 	for (s32 k = 0;; k++) {
 		u64 w;
 		memcpy(&w, tail + 8 * k, 8);
 		if (!CPU_IS_LITTLE_ENDIAN())
 			w = bswap64(w);
-		u64 shifted = (w << 8) | carry, z = zero_bytes(w ^ vc);
+		u64 shifted = (w << 8) | in, z = zero_bytes(w ^ vc);
 		if (z) {
 			u64 upto = (z << 1) - 1;
 			w ^= (w ^ shifted) & upto;
 			if (!CPU_IS_LITTLE_ENDIAN())
 				w = bswap64(w);
 			memcpy(tail + 8 * k, &w, 8);
-			r = 8 + 8 * k + (s32)(bsf64(z) >> 3);
+			r = 16 + 8 * k + (s32)(bsf64(z) >> 3);
 			break;
 		}
 		if (!CPU_IS_LITTLE_ENDIAN())
 			shifted = bswap64(shifted);
 		memcpy(tail + 8 * k, &shifted, 8);
-		carry = w >> 56;
+		in = w >> 56;
 	}
 #endif
-	lst->head = (lst->head << 8) | c;
 	return r;
 }
 
-#define MTF_SYMBOL(c)                                                   \
-	do {                                                            \
-		u8 c_ = (c);                                            \
-		u64 h_ = lst.head;                                      \
-		u64 z_ = zero_bytes(h_ ^ (0x0101010101010101ULL * c_)); \
-		s32 r_;                                                 \
-		if (likely(z_)) {                                       \
-			r_ = (s32)(bsf64(z_) >> 3);                     \
-			lst.head = h_ ^ ((h_ ^ ((h_ << 8) | c_)) &      \
-					 ((z_ << 1) - 1));              \
-		} else {                                                \
-			r_ = tail_move_to_front(&lst, c_);              \
-		}                                                       \
-		mtfv[wr++] = (u16)(r_ + 1);                             \
-		mtf_freq[r_ + 1]++;                                     \
-	} while (0)
+/*
+ * 0x80 in the lowest zero byte of x, and perhaps in bytes above it, where the
+ * borrow reaches.  A list word xor c has at most one zero byte (the list holds
+ * each byte in use once, and the filler is not in use), so the lowest flag is
+ * the match, and z ^ (z - 1) masks the bytes up to it.  It keeps the chain
+ * from one symbol's head to the next two operations shorter than zero_bytes()
+ * would.
+ */
+static forceinline u64
+borrow_zero_bytes(u64 x)
+{
+	return (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
+}
 
-#if VEC_X86
-/* Bit k set iff p[k] != p[k-1], k = 0..63 (reads p[-1..63)). */
-static inline u64
-change_mask64(const u8 *p)
-{
-#  if defined(__AVX2__)
-	u64 lo = (u32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(
-		_mm256_loadu_si256((const __m256i *)p),
-		_mm256_loadu_si256((const __m256i *)(p - 1))));
-	u64 hi = (u32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(
-		_mm256_loadu_si256((const __m256i *)(p + 32)),
-		_mm256_loadu_si256((const __m256i *)(p + 31))));
-	return ~(lo | hi << 32);
-#  else
-	u64 m = 0;
-	for (int k = 0; k < 4; k++)
-		m |= vec_mask(
-			     vec_eq(vec_ld(p + 16 * k), vec_ld(p + 16 * k - 1)))
-		     << (16 * k);
-	return ~m;
-#  endif
-}
-#elif VEC_NEON
-/* Bit k set iff p[k] != p[k-1], k = 0..63 (reads p[-1..63)). */
-static inline u64
-change_mask64(const u8 *p)
-{
-	static const u8 bits[16] = {1, 2, 4, 8, 16, 32, 64, 128,
-				    1, 2, 4, 8, 16, 32, 64, 128};
-	uint8x16_t w = vld1q_u8(bits);
-	uint8x16_t e0 = vandq_u8(vceqq_u8(vld1q_u8(p), vld1q_u8(p - 1)), w);
-	uint8x16_t e1 =
-		vandq_u8(vceqq_u8(vld1q_u8(p + 16), vld1q_u8(p + 15)), w);
-	uint8x16_t e2 =
-		vandq_u8(vceqq_u8(vld1q_u8(p + 32), vld1q_u8(p + 31)), w);
-	uint8x16_t e3 =
-		vandq_u8(vceqq_u8(vld1q_u8(p + 48), vld1q_u8(p + 47)), w);
-	uint8x16_t s = vpaddq_u8(vpaddq_u8(e0, e1), vpaddq_u8(e2, e3));
-	s = vpaddq_u8(s, s);
-	return ~vgetq_lane_u64(vreinterpretq_u64_u8(s), 0);
-}
-#endif
+/*
+ * Moves c to the front of the list and codes its rank.  The list is entries
+ * 0..7 in head (entry 0 in the low byte), 8..15 in head1 and 16..255 in tail;
+ * the head words are locals whose address is never taken, so compilers keep
+ * them in registers.  Ranks below 16 take no branch: at most one of z0 and z1
+ * is nonzero, z0 ^ (z0 - 1) is all ones when z0 is 0 (head then shifts up
+ * whole, its last entry going to head1), and z1 >> 7 lets one bit scan find
+ * either flag.
+ */
+#define MTF_SYMBOL(c)                                                          \
+	do {                                                                   \
+		u8 c_ = (c);                                                   \
+		u64 cc_ = 0x0101010101010101ULL * c_;                          \
+		u64 z0_ = borrow_zero_bytes(head ^ cc_);                       \
+		u64 z1_ = borrow_zero_bytes(head1 ^ cc_);                      \
+		s32 r_;                                                        \
+		if (likely(z0_ | z1_)) {                                       \
+			u64 m1_ = (z1_ ^ (z1_ - 1)) & ((u64)0 - (z1_ != 0));   \
+			r_ = (s32)(bsf64(z0_ | z1_ >> 7) >> 3) +               \
+			     8 * (z0_ == 0);                                   \
+			head1 ^=                                               \
+				(head1 ^ ((head1 << 8) | (head >> 56))) & m1_; \
+			head ^= (head ^ ((head << 8) | c_)) &                  \
+				(z0_ ^ (z0_ - 1));                             \
+		} else {                                                       \
+			r_ = tail_move_to_front(tail, (u8)(head1 >> 56), c_);  \
+			head1 = (head1 << 8) | (head >> 56);                   \
+			head = (head << 8) | c_;                               \
+		}                                                              \
+		mtfv[wr++] = (u16)(r_ + 1);                                    \
+		mtf_freq[r_ + 1]++;                                            \
+	} while (0)
 
 s32
 ADD_SUFFIX(bzng_mtf)(const u8 *L, s32 n, const u8 *in_use, u16 *mtfv,
@@ -506,9 +653,11 @@ ADD_SUFFIX(bzng_mtf)(const u8 *L, s32 n, const u8 *in_use, u16 *mtfv,
 {
 	u8 list[256 + 16];
 	s32 n_in_use = 0;
-	for (int i = 0; i < 256; i++)
-		if (in_use[i])
-			list[n_in_use++] = (u8)i;
+	/* No branch per byte: an irregular alphabet would mispredict. */
+	for (int i = 0; i < 256; i++) {
+		list[n_in_use] = (u8)i;
+		n_in_use += in_use[i];
+	}
 	/*
 	 * Unused slots must never match a symbol: fill with a byte not in use
 	 * (there is one whenever there are unused slots).
@@ -521,12 +670,11 @@ ADD_SUFFIX(bzng_mtf)(const u8 *L, s32 n, const u8 *in_use, u16 *mtfv,
 		}
 	for (int i = n_in_use; i < 256 + 16; i++)
 		list[i] = filler;
-	mtf_list lst;
-	memcpy(&lst.head, list, 8);
-	if (!CPU_IS_LITTLE_ENDIAN())
-		lst.head = bswap64(lst.head);
-	memcpy(lst.tail, list + 8, 248);
-	memset(lst.tail + 248, filler, 8);
+	u64 head = get_unaligned_le64(list),
+	    head1 = get_unaligned_le64(list + 8);
+	_Alignas(16) u8 tail[256];
+	memcpy(tail, list + 16, 240);
+	memset(tail + 240, filler, 16);
 
 	s32 eob = n_in_use + 1;
 	for (s32 i = 0; i <= eob; i++)
@@ -538,7 +686,7 @@ ADD_SUFFIX(bzng_mtf)(const u8 *L, s32 n, const u8 *in_use, u16 *mtfv,
 
 	/* Position 0 compares with the list head (seq 0), the others with
 	 * L[i-1]. */
-	if (L[0] == (u8)lst.head)
+	if (L[0] == (u8)head)
 		z_pend = 1;
 	else
 		MTF_SYMBOL(L[0]);
